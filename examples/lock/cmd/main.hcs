@@ -1,0 +1,64 @@
+get <bit:gui>
+
+struct Lock [
+    pw: Str,
+    msg: Str,
+    clock: Str,
+    date: Str,
+    done: Bool
+]
+
+fun update(s: Lock, m: Message) -> Lock [
+    let n = s.clone()
+    if m.id == "pw" [
+        n.pw = m.text.clone()
+        n.msg = ""
+    ]
+    if m.id == "unlock" [
+        if n.pw == "gui" [
+            n.done = true
+        ] else [
+            n.msg = "Nieprawidłowe hasło"
+            n.pw = ""
+        ]
+    ]
+    if m.id == "tick" [
+        n.clock = clock_hm()
+        n.date = clock_date()
+    ]
+    end n
+]
+
+fun main() [
+    let app = app_new_headless_shell()
+    app.set_tick(1000)
+    if not gui_session_lock(1) == 1 [
+        log("Kompozytor nie wspiera ext-session-lock-v1")
+    ]
+    let s = Lock("", "", clock_hm(), clock_date(), false)
+    let opened = false
+    while app.running() and not s.done [
+        if not opened [
+            let o = 0
+            for oi in 0..1 [
+                o = o + 1
+            ]
+            let id = app.open_window("lock", "lock", 0, 0, "")
+            opened = id >= 0
+        ]
+        let uis: List<Element> = []
+        for id in app.window_ids() [
+            uis.push(lock_view(s.clock.clone(), s.date.clone(), s.pw.clone(), s.msg.clone()))
+        ]
+        for m in app.frame(uis) [
+            s = update(s.clone(), m)
+            if m.id == "lock" and m.text == "finished" [
+                s.done = true
+            ]
+        ]
+        if opened and app.window_ids().len() > 0 and s.pw == "" and s.msg == "" [
+            app.focus_id(app.window_ids()[0], "@.0.3")
+        ]
+    ]
+    gui_session_lock(0)
+]
