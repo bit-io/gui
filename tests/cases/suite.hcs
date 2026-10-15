@@ -1,0 +1,407 @@
+get <bit:gui>
+
+fun check(name: Str, ok: Bool) -> Int [
+    if ok [
+        log("  ok    " + name)
+        end 0
+    ]
+    log("  FAIL  " + name)
+    end 1
+]
+
+fun near(a: Float, b: Float) -> Bool [
+    end fabs(a - b) < 0.6
+]
+
+fun count_msgs(msgs: List<Message>, id: Str) -> Int [
+    let n = 0
+    let i = 0
+    while i < msgs.len() [
+        if msgs[i].id == id [
+            n = n + 1
+        ]
+        i = i + 1
+    ]
+    end n
+]
+
+fun last_msg(msgs: List<Message>, id: Str) -> Message [
+    let r = message("")
+    let i = 0
+    while i < msgs.len() [
+        if msgs[i].id == id [
+            r = msgs[i].clone()
+        ]
+        i = i + 1
+    ]
+    end r
+]
+
+!! ------------------------------------------------------------------ kolory i narzedzia
+fun t_color() -> Int [
+    let f = 0
+    log("kolory")
+    f = f + check("hex #89b4fa", parse_color("#89b4fa") == rgb(137, 180, 250))
+    f = f + check("skrot #fff", parse_color("#fff") == rgb(255, 255, 255))
+    f = f + check("#rrggbbaa", parse_color("#11223380") == rgba(17, 34, 51, 128))
+    f = f + check("zly kolor -> 0", parse_color("#zzz") == 0)
+    f = f + check("mix 50%", mix(rgb(0, 0, 0), rgb(255, 255, 255), 0.5) == rgb(127, 127, 127))
+    f = f + check("with_alpha", col_a(with_alpha(rgb(1, 2, 3), 40)) == 40)
+    f = f + check("fmt_float", fmt_float(3.14159, 2) == "3.14")
+    f = f + check("slen znaki UTF-8", slen("Zażółć") == 6)
+    f = f + check("s_replace", s_replace("a-b-c", "-", "+") == "a+b+c")
+    end f
+]
+
+!! ------------------------------------------------------------------ CSS
+fun t_css() -> Int [
+    let f = 0
+    log("css")
+    let sh = css_parse(".primary { background: #89b4fa; border-radius: 12px; padding: 8px 20px; } button:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.5); } #x, .y { opacity: 0.5; font-size: 20px; }")
+    f = f + check("liczba regul", sh.rules.len() == 4)
+    let st = css_apply(sh.clone(), "button", "primary", "", "")
+    f = f + check("background", st.bg == rgb(137, 180, 250))
+    f = f + check("radius", near(st.radius, 12.0))
+    f = f + check("padding 2 wartosci", near(st.pt, 8.0) and near(st.pl, 20.0))
+    let h = css_apply(sh.clone(), "button", "", "", "hover")
+    f = f + check("hover shadow", near(h.sh_blur, 12.0) and near(h.sh_dy, 4.0))
+    let y = css_apply(sh.clone(), "text", "y", "", "")
+    f = f + check("selektor klasy z listy", near(y.opacity, 0.5) and near(y.size, 20.0))
+    let none = css_apply(sh, "text", "zzz", "", "")
+    f = f + check("brak dopasowania", none.bg == UNSET_I)
+    end f
+]
+
+fun find_kind(b: Box, kind: Str) -> Box [
+    if b.el.kind == kind [
+        end b.clone()
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        let r = find_kind(b.kids[i].clone(), kind)
+        if r.el.kind == kind [
+            end r
+        ]
+        i = i + 1
+    ]
+    end b.clone()
+]
+
+fun do_layout(ui: Element, w: Float, h: Float) -> Box [
+    let ctx = Ctx(theme_dark(), sheet_empty(), "", "", "")
+    let sc: Dict<Str, Float> = dict()
+    end layout_root(resolve_el(ui, ctx, "r"), w, h, sc)
+]
+
+!! ------------------------------------------------------------------ layout
+fun t_layout() -> Int [
+    let f = 0
+    log("layout")
+    let ui = column([ space().height(fixed(40.0)), space().height(fixed(60.0)) ]).padding(10.0).spacing(5.0)
+    let b = do_layout(ui, 200.0, 300.0)
+    f = f + check("kolumna: pozycja dziecka 2", near(b.kids[1].y, 10.0 + 40.0 + 5.0))
+    let r = do_layout(row([ space().width(fixed(30.0)), space().fill_width(), space().width(fixed(30.0)) ]).fill_width().padding(0.0), 200.0, 50.0)
+    f = f + check("wiersz: fill rozciaga srodek", near(r.kids[1].w, 140.0))
+    f = f + check("wiersz: prawy na krawedzi", near(r.kids[2].x, 170.0))
+    let p = do_layout(row([ space().width(fixed(10.0)).fill_height(), space().width(fixed(10.0)).fill_height() ]).fill_all(), 100.0, 100.0)
+    f = f + check("fill_height", near(p.kids[0].h, 100.0))
+    let pr = do_layout(row([ space().width(fixed(10.0)).height(fixed(10.0)), space().width(portion(1.0)).height(fixed(10.0)), space().width(portion(3.0)).height(fixed(10.0)) ]).fill_width(), 410.0, 40.0)
+    f = f + check("portion 1:3", near(pr.kids[2].w, 3.0 * pr.kids[1].w))
+    let c = do_layout(container(space().size_px(20.0, 20.0)).center(), 100.0, 100.0)
+    f = f + check("center x", near(c.kids[0].x, 40.0))
+    f = f + check("center y", near(c.kids[0].y, 40.0))
+    let t1 = do_layout(container(column([ text("Bardzo dlugi tekst ktory musi sie zawinac w kilku liniach") ]).width(fixed(120.0))), 300.0, 300.0)
+    f = f + check("zawijanie tekstu", t1.kids[0].kids[0].lines.len() >= 3)
+    let t2 = do_layout(container(column([ text("Krotki") ]).width(fixed(200.0))), 300.0, 300.0)
+    f = f + check("krotki tekst: 1 linia", t2.kids[0].kids[0].lines.len() == 1)
+    let al = do_layout(column([ space().size_px(20.0, 20.0) ]).fill_width().align_x(2), 100.0, 100.0)
+    f = f + check("align_x koniec", near(al.kids[0].x, 80.0))
+    let sc = do_layout(scrollable(column([ space().height(fixed(500.0)) ])).height(fixed(100.0)), 100.0, 100.0)
+    f = f + check("scrollable: tresc wyzsza od okna", sc.kids[0].kids.len() == 1 and sc.ch >= 500.0)
+    end f
+]
+
+!! ------------------------------------------------------------------ renderowanie
+fun t_render() -> Int [
+    let f = 0
+    log("render")
+    gui_fonts_init(font_regular_b64(), font_semibold_b64(), icon_table())
+    gui_init("headless")
+    let id = gui_win_create("toplevel", "t", 240, 160, "")
+    let ui = card(column([ heading("Test"), button("OK").class("primary"), icon("wifi") ]).spacing(8.0)).padding(12.0)
+    let ctx = Ctx(theme_dark(), sheet_empty(), "", "", "")
+    let sc: Dict<Str, Float> = dict()
+    let b = layout_root(resolve_el(ui, ctx, "r"), 240.0, 160.0, sc)
+    let rc = RCtx(theme_dark(), "", "", "", dict(), dict(), dict(), "", "", false, 0.0, 0.0, 240.0, 160.0, -1)
+    let ops = render_scene(b, rc, theme_dark().p.bg)
+    f = f + check("lista polecen niepusta", ops.f.len() > 40)
+    f = f + check("rysowanie zwraca 0", gui_win_draw(id, ops.f, ops.s) == 0)
+    f = f + check("zrzut PNG", gui_screenshot(id, "/tmp/gui_test_render.png") == 0 and gui_file_size("/tmp/gui_test_render.png") > 1000)
+    f = f + check("pomiar tekstu > 0", gui_text_measure("Hello", 14.0, 0, 0.0) > 20.0)
+    f = f + check("polskie znaki maja szerokosc", gui_text_measure("żółć", 14.0, 0, 0.0) > 20.0)
+    f = f + check("zawijanie natywne", gui_text_wrap("aa bb cc dd ee ff", 14.0, 0, 40.0, 0.0).len() >= 3)
+    end f
+]
+
+fun center_x(app: App, id: Str) -> Float [
+    match find_box(app.wins[0].last.clone(), id) [
+        Some(b) -> [
+            end b.x + b.w / 2.0
+        ]
+        None -> [
+        ]
+    ]
+    end -1.0
+]
+
+fun center_y(app: App, id: Str) -> Float [
+    match find_box(app.wins[0].last.clone(), id) [
+        Some(b) -> [
+            end b.y + b.h / 2.0
+        ]
+        None -> [
+        ]
+    ]
+    end -1.0
+]
+
+fun inject_click(x: Float, y: Float) [
+    gui_inject("ptr_move\t1\t" + (x as Str) + "\t" + (y as Str))
+    gui_inject("ptr_down\t1\t0\t" + (x as Str) + "\t" + (y as Str))
+    gui_inject("ptr_up\t1\t0\t" + (x as Str) + "\t" + (y as Str))
+]
+
+fun inject_key(name: Str, text: Str, mods: Int) [
+    gui_inject("key\t1\t1\t0\t" + name + "\t" + text + "\t" + (mods as Str))
+    gui_inject("key\t1\t0\t0\t" + name + "\t\t" + (mods as Str))
+]
+
+!! ------------------------------------------------------------------ interakcje
+fun t_buttons() -> Int [
+    let f = 0
+    log("przyciski, checkbox, toggler, radio")
+    let app = app_new("t", 360, 240)
+    let got: List<Message> = []
+    let on = false
+    let ui = column([ button("Idz").id("b").on_press("go"), checkbox("c", on).id("c").on_toggle("chk"), toggler("t", false).id("t").on_toggle("tg"), radio("r", false).id("rad").on_select("rd"), button("Off").id("d").on_press("dis").disabled(true) ]).padding(20.0).spacing(12.0)
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    inject_click(center_x(app, "b"), center_y(app, "b"))
+    inject_click(center_x(app, "c"), center_y(app, "c"))
+    inject_click(center_x(app, "t"), center_y(app, "t"))
+    inject_click(center_x(app, "rad"), center_y(app, "rad"))
+    inject_click(center_x(app, "d"), center_y(app, "d"))
+    for i in 0..6 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("klik przycisku", count_msgs(got, "go") == 1)
+    f = f + check("checkbox flag=true", count_msgs(got, "chk") == 1 and last_msg(got, "chk").flag)
+    f = f + check("toggler flag=true", last_msg(got, "tg").flag)
+    f = f + check("radio flag=true", last_msg(got, "rd").flag)
+    f = f + check("wylaczony przycisk milczy", count_msgs(got, "dis") == 0)
+    end f
+]
+
+fun t_input() -> Int [
+    let f = 0
+    log("pole tekstowe")
+    let app = app_new("t", 360, 200)
+    let got: List<Message> = []
+    let val = ""
+    let ui = column([ text_input("p", val).id("in").on_input("typed").on_submit("sub") ]).padding(20.0)
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    inject_click(center_x(app, "in"), center_y(app, "in"))
+    inject_key("Z", "Z", 1)
+    inject_key("a", "a", 0)
+    inject_key("ż", "ż", 0)
+    for i in 0..4 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("3 komunikaty pisania", count_msgs(got, "typed") == 3)
+    f = f + check("tekst narasta (polskie znaki)", last_msg(got, "typed").text == "Zaż")
+    let ui2 = column([ text_input("p", "Zaż").id("in").on_input("typed").on_submit("sub") ]).padding(20.0)
+    for i in 0..2 [
+        for m in app.frame1(ui2.clone()) [
+            got.push(m)
+        ]
+    ]
+    inject_key("Backspace", "", 0)
+    inject_key("Enter", "", 0)
+    for i in 0..3 [
+        for m in app.frame1(ui2.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("backspace usuwa znak UTF-8", last_msg(got, "typed").text == "Za")
+    f = f + check("enter = on_submit", count_msgs(got, "sub") == 1)
+    let r = edit_apply("abc def", 7, 7, "Backspace", "", 2)
+    f = f + check("ctrl+backspace usuwa slowo", r.text == "abc ")
+    let r2 = edit_apply("abc", 3, 3, "ArrowLeft", "", 0)
+    f = f + check("strzalka w lewo", r2.caret == 2 and not r2.changed)
+    let r3 = edit_apply("abc", 1, 3, "x", "x", 0)
+    f = f + check("wstawienie zastepuje zaznaczenie", r3.text == "ax")
+    end f
+]
+
+fun t_slider_tabs_pick() -> Int [
+    let f = 0
+    log("suwak, zakladki, lista, Tab, przewijanie")
+    let app = app_new("t", 400, 420)
+    let got: List<Message> = []
+    let ui = column([ slider(0.0, 100.0, 0.0).id("sl").on_change("v").width(fixed(300.0)), tabs(["A", "B", "C"], 0).id("tb").on_select("tab"), pick_list(["x", "y", "z"], "x").id("pk").on_select("pick"), button("1").id("b1").on_press("b1"), button("2").id("b2").on_press("b2"), scrollable(column([ space().height(fixed(600.0)) ])).id("scr").height(fixed(80.0)) ]).padding(20.0).spacing(12.0)
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    gui_inject("ptr_move\t1\t" + (center_x(app, "sl")) as Str + "\t" + (center_y(app, "sl")) as Str)
+    gui_inject("ptr_down\t1\t0\t" + (center_x(app, "sl")) as Str + "\t" + (center_y(app, "sl")) as Str)
+    gui_inject("ptr_up\t1\t0\t" + (center_x(app, "sl")) as Str + "\t" + (center_y(app, "sl")) as Str)
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    let v = last_msg(got, "v").num
+    f = f + check("suwak: klik w srodek ~50", v > 44.0 and v < 56.0)
+    let tx = center_x(app, "tb") + 25.0
+    inject_click(tx, center_y(app, "tb"))
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("zakladki: wybor indeksu", count_msgs(got, "tab") == 1 and last_msg(got, "tab").idx >= 1)
+    inject_click(center_x(app, "pk"), center_y(app, "pk"))
+    for i in 0..2 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("lista: otwarta nakladka", app.wins[0].open_pick == "pk")
+    inject_key("ArrowDown", "", 0)
+    inject_key("Escape", "", 0)
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("Escape zamyka liste", app.wins[0].open_pick == "")
+    inject_key("Tab", "", 0)
+    inject_key("Tab", "", 0)
+    inject_key("Enter", "", 0)
+    for i in 0..4 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    f = f + check("Tab przechodzi miedzy fokusowalnymi", app.wins[0].focus != "")
+    gui_inject("scroll\t1\t0\t10\t" + (center_x(app, "scr")) as Str + "\t" + (center_y(app, "scr")) as Str)
+    for i in 0..3 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+    ]
+    let off = 0.0
+    match app.wins[0].scroll.fetch("scr") [
+        Some(o) -> [
+            off = o
+        ]
+        None -> [
+        ]
+    ]
+    f = f + check("przewijanie kolem", off > 5.0)
+    end f
+]
+
+!! ------------------------------------------------------------------ powloka
+fun t_shell() -> Int [
+    let f = 0
+    log("powloka")
+    f = f + check("bar_opts", s_find(bar_opts("top", 40, "n"), "exclusive=40") >= 0 and s_find(bar_opts("top", 40, "n"), "anchor=top,left,right") >= 0)
+    f = f + check("overlay_opts: kb exclusive", s_find(overlay_opts("x"), "kb=exclusive") >= 0)
+    let tl: List<TopLevel> = []
+    let m = message("toplevel")
+    m.idx = 77
+    m.text = "Terminal"
+    m.text2 = "foot"
+    m.text3 = "activated"
+    tl = taskbar_update(tl, m)
+    f = f + check("pasek zadan: dodanie", tl.len() == 1 and tl[0].title == "Terminal")
+    let m2 = message("toplevel")
+    m2.idx = 77
+    m2.text = "Terminal 2"
+    tl = taskbar_update(tl, m2)
+    f = f + check("pasek zadan: aktualizacja", tl.len() == 1 and tl[0].title == "Terminal 2")
+    let m3 = message("toplevel_closed")
+    m3.idx = 77
+    tl = taskbar_update(tl, m3)
+    f = f + check("pasek zadan: zamkniecie", tl.len() == 0)
+    let hm = message("tl:123")
+    f = f + check("tl_handle_of", tl_handle_of(hm) == 123)
+    let apps: List<AppEntry> = [ AppEntry("Firefox", "firefox", "", "Przegladarka"), AppEntry("Foot", "foot", "", "Terminal") ]
+    f = f + check("filtr launchera", apps_filter(apps.clone(), "fire").len() == 1 and apps_filter(apps.clone(), "").len() == 2)
+    f = f + check("filtr po komentarzu", apps_filter(apps, "termin").len() == 1)
+    end f
+]
+
+!! ------------------------------------------------------------------ wydajnosc
+fun t_perf() -> Int [
+    let f = 0
+    log("wydajnosc (300 elementow)")
+    let rows: List<Element> = []
+    let i = 0
+    while i < 100 [
+        rows.push(row([ icon("file").size(16.0), text("Pozycja " + (i as Str)), space().fill_width(), button("OK").on_press("x") ]).spacing(8.0).fill_width())
+        i = i + 1
+    ]
+    let ui = column(rows).spacing(4.0).padding(10.0).fill_all()
+    let ctx = Ctx(theme_dark(), sheet_empty(), "", "", "")
+    let sc: Dict<Str, Float> = dict()
+    let t0 = gui_now_ms()
+    let r = resolve_el(ui, ctx, "@")
+    let t1 = gui_now_ms()
+    let b = layout_root(r, 600.0, 4000.0, sc)
+    let t2 = gui_now_ms()
+    let rc = RCtx(theme_dark(), "", "", "", dict(), dict(), dict(), "", "", false, 0.0, 0.0, 600.0, 4000.0, -1)
+    let ops = render_scene(b, rc, 0)
+    let t3 = gui_now_ms()
+    gui_init("headless")
+    let id = gui_win_create("toplevel", "p", 600, 800, "")
+    let t4 = gui_now_ms()
+    gui_win_draw(id, ops.f, ops.s)
+    let t5 = gui_now_ms()
+    log("  resolve " + ((t1 - t0) as Str) + " ms, layout " + ((t2 - t1) as Str) + " ms, polecenia " + ((t3 - t2) as Str) + " ms, rasteryzacja 600x800 " + ((t5 - t4) as Str) + " ms")
+    f = f + check("resolve+layout+render < 1500 ms", t3 - t0 < 1500)
+    end f
+]
+
+fun main() [
+    let fails = 0
+    fails = fails + t_color()
+    fails = fails + t_css()
+    fails = fails + t_layout()
+    fails = fails + t_render()
+    fails = fails + t_buttons()
+    fails = fails + t_input()
+    fails = fails + t_slider_tabs_pick()
+    fails = fails + t_shell()
+    fails = fails + t_perf()
+    if fails == 0 [
+        log("WSZYSTKIE TESTY ZALICZONE")
+    ] else [
+        log("NIEZALICZONE: " + (fails as Str))
+    ]
+    gui_exit(fails)
+]
