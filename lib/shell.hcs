@@ -1,0 +1,324 @@
+get <bit:gui::native>
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::theme>
+get <bit:gui::element>
+
+!! ---------------------------------------------------------------- opcje okien layer-shell
+!! layer: background | bottom | top | overlay;  anchor: np. "top,left,right";  margin: "gora,prawo,dol,lewo"
+!! kb: none | ondemand | exclusive
+fun layer_opts(layer: Str, anchor: Str, exclusive: Int, margin: Str, kb: Str, ns: Str) -> Str [
+    end "layer=" + layer + ";anchor=" + anchor + ";exclusive=" + (exclusive as Str) + ";margin=" + margin + ";kb=" + kb + ";ns=" + ns
+]
+
+!! panel przy krawedzi (top | bottom): rezerwuje miejsce (exclusive zone) i rozciaga sie na cala szerokosc
+fun bar_opts(edge: Str, thickness: Int, ns: Str) -> Str [
+    end layer_opts("top", edge + ",left,right", thickness, "0,0,0,0", "none", ns) + ";fill_w=1"
+]
+
+!! panel pionowy (left | right)
+fun side_bar_opts(edge: Str, thickness: Int, ns: Str) -> Str [
+    end layer_opts("top", edge + ",top,bottom", thickness, "0,0,0,0", "none", ns) + ";fill_h=1"
+]
+
+!! plywajacy dok (srodek dolnej krawedzi, bez rezerwacji miejsca)
+fun dock_opts(margin_bottom: Int, ns: Str) -> Str [
+    end layer_opts("top", "bottom", 0, "0,0," + (margin_bottom as Str) + ",0", "none", ns)
+]
+
+!! pelnoekranowa nakladka (launcher, przelacznik okien) z wylacznym fokusem klawiatury
+fun overlay_opts(ns: Str) -> Str [
+    end layer_opts("overlay", "top,bottom,left,right", -1, "0,0,0,0", "exclusive", ns) + ";fill_w=1;fill_h=1"
+]
+
+!! tapeta (warstwa background na caly ekran)
+fun wallpaper_opts(ns: Str) -> Str [
+    end layer_opts("background", "top,bottom,left,right", -1, "0,0,0,0", "none", ns) + ";fill_w=1;fill_h=1"
+]
+
+!! powiadomienia (prawy gorny rog)
+fun toast_opts(margin_top: Int, margin_right: Int, ns: Str) -> Str [
+    end layer_opts("overlay", "top,right", 0, (margin_top as Str) + "," + (margin_right as Str) + ",0,0", "none", ns)
+]
+
+!! OSD (srodek dolu)
+fun osd_opts(margin_bottom: Int, ns: Str) -> Str [
+    end layer_opts("overlay", "bottom", 0, "0,0," + (margin_bottom as Str) + ",0", "none", ns)
+]
+
+!! ---------------------------------------------------------------- lista okien (wlr-foreign-toplevel)
+struct TopLevel [
+    handle: Int,
+    title: Str,
+    app_id: Str,
+    state: Str
+]
+
+fun tl_has(t: TopLevel, flag: Str) -> Bool [
+    end s_find(t.state.clone(), flag) >= 0
+]
+
+!! wywolaj z kazdym komunikatem: obsluguje "toplevel" (dodanie/zmiana) i "toplevel_closed"
+fun taskbar_update(list: List<TopLevel>, m: Message) -> List<TopLevel> [
+    let out: List<TopLevel> = []
+    if m.id == "toplevel" [
+        let found = false
+        let i = 0
+        while i < list.len() [
+            if list[i].handle == m.idx [
+                out.push(TopLevel(m.idx, m.text.clone(), m.text2.clone(), m.text3.clone()))
+                found = true
+            ] else [
+                out.push(list[i].clone())
+            ]
+            i = i + 1
+        ]
+        if not found [
+            out.push(TopLevel(m.idx, m.text.clone(), m.text2.clone(), m.text3.clone()))
+        ]
+        end out
+    ]
+    if m.id == "toplevel_closed" [
+        let i = 0
+        while i < list.len() [
+            if list[i].handle != m.idx [
+                out.push(list[i].clone())
+            ]
+            i = i + 1
+        ]
+        end out
+    ]
+    end list.clone()
+]
+
+!! id komunikatu przyciskow paska zadan to "tl:<uchwyt>"; zwraca uchwyt lub -1
+fun tl_handle_of(m: Message) -> Int [
+    if s_starts(m.id.clone(), "tl:") [
+        end parse_i(s_sub(m.id.clone(), 3, slen(m.id.clone())))
+    ]
+    end -1
+]
+
+!! akcje: activate | close | minimize | unminimize | maximize | unmaximize
+fun toplevel_action(handle: Int, action: Str) [
+    gui_toplevel_action(handle, action)
+]
+
+fun short_title(s: Str, n: Int) -> Str [
+    if slen(s.clone()) <= n [
+        end s
+    ]
+    end s_sub(s.clone(), 0, n - 1) + "…"
+]
+
+!! pasek zadan: rząd przyciskow (aktywne okno podswietlone)
+fun taskbar_view(list: List<TopLevel>, th: Theme) -> Element [
+    let kids: List<Element> = []
+    let i = 0
+    while i < list.len() [
+        let t = list[i].clone()
+        let label = t.title.clone()
+        if label == "" [
+            label = t.app_id.clone()
+        ]
+        let b = button(short_title(label, 22)).on_press("tl:" + (t.handle as Str)).class("ghost")
+        if tl_has(t.clone(), "activated") [
+            b = b.background(with_alpha(th.p.primary, 60)).color(th.p.primary)
+        ]
+        kids.push(b)
+        i = i + 1
+    ]
+    end row(kids).spacing(4.0)
+]
+
+!! ---------------------------------------------------------------- monitory (xdg-output / wl_output)
+struct OutputInfo [
+    name: Str,
+    x: Int,
+    y: Int,
+    w: Int,
+    h: Int,
+    scale: Int
+]
+
+fun outputs_update(list: List<OutputInfo>, m: Message) -> List<OutputInfo> [
+    if m.id != "output" or m.args.len() < 7 [
+        end list.clone()
+    ]
+    let o = OutputInfo(m.args[1].clone(), parse_i(m.args[2].clone()), parse_i(m.args[3].clone()), parse_i(m.args[4].clone()), parse_i(m.args[5].clone()), parse_i(m.args[6].clone()))
+    let out: List<OutputInfo> = []
+    let found = false
+    let i = 0
+    while i < list.len() [
+        if list[i].name == o.name [
+            out.push(o.clone())
+            found = true
+        ] else [
+            out.push(list[i].clone())
+        ]
+        i = i + 1
+    ]
+    if not found [
+        out.push(o)
+    ]
+    end out
+]
+
+!! ---------------------------------------------------------------- system: czas, bateria, glosnosc
+fun sh_out(cmd: Str, args: List<Str>) -> Str [
+    let s: Str = gui_run(cmd, args)
+    let n = slen(s.clone())
+    if n > 0 and s.char_at(n - 1) == "\n" [
+        end s_sub(s.clone(), 0, n - 1)
+    ]
+    end s
+]
+
+fun clock_hm() -> Str [
+    end sh_out("date", ["+%H:%M"])
+]
+
+fun clock_date() -> Str [
+    end sh_out("date", ["+%A, %-d %B"])
+]
+
+!! procent baterii lub -1 gdy brak
+fun battery_percent() -> Int [
+    let names = ["BAT0", "BAT1", "battery"]
+    let i = 0
+    while i < names.len() [
+        let t = gui_read_file("/sys/class/power_supply/" + names[i] + "/capacity")
+        if slen(t.clone()) > 0 [
+            end parse_i(t)
+        ]
+        i = i + 1
+    ]
+    end -1
+]
+
+fun battery_charging() -> Bool [
+    let names = ["BAT0", "BAT1", "battery"]
+    let i = 0
+    while i < names.len() [
+        let t = gui_read_file("/sys/class/power_supply/" + names[i] + "/status")
+        if s_starts(t.clone(), "Charging") [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!! glosnosc 0..100 (wpctl/PipeWire) lub -1
+fun volume_percent() -> Int [
+    let o = sh_out("wpctl", ["get-volume", "@DEFAULT_AUDIO_SINK@"])
+    if s_starts(o.clone(), "Volume:") [
+        let v = parse_f(s_sub(o.clone(), 8, slen(o.clone())))
+        end (v * 100.0) as Int
+    ]
+    end -1
+]
+
+!! ---------------------------------------------------------------- launcher (pliki .desktop)
+struct AppEntry [
+    name: Str,
+    exec: Str,
+    icon: Str,
+    comment: Str
+]
+
+fun apps_load() -> List<AppEntry> [
+    let out: List<AppEntry> = []
+    let lines = gui_list_apps()
+    let i = 0
+    while i < lines.len() [
+        let p = s_split(lines[i].clone(), "\t")
+        if p.len() >= 4 [
+            out.push(AppEntry(p[0].clone(), p[1].clone(), p[2].clone(), p[3].clone()))
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun apps_filter(apps: List<AppEntry>, query: Str) -> List<AppEntry> [
+    if slen(query.clone()) == 0 [
+        end apps.clone()
+    ]
+    let q = gui_lower(query)
+    let out: List<AppEntry> = []
+    let i = 0
+    while i < apps.len() [
+        let hay = gui_lower(apps[i].name.clone() + " " + apps[i].comment.clone())
+        if s_find(hay, q.clone()) >= 0 [
+            out.push(apps[i].clone())
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!! uruchamia program (odlaczony od procesu powloki)
+fun app_launch(exec: Str) [
+    gui_spawn("sh", ["-c", exec])
+]
+
+!! ---------------------------------------------------------------- gotowe widoki
+!! pasek stanu: lewo / srodek / prawo
+fun bar_layout(left: Element, middle: Element, right: Element) -> Element [
+    let l = container(left).align_y(1).fill_height()
+    let m = container(middle).align_y(1).align_x(1).fill_height().fill_width()
+    let r = container(right).align_y(1).align_x(2).fill_height()
+    end row([l, m, r]).fill_all().padding_xy(10.0, 0.0).spacing(8.0)
+]
+
+fun toast(title: Str, body: Str, icon_name: Str) -> Element [
+    let head = row([ icon(icon_name).size(20.0).class("primary"), text(title).bold() ]).spacing(10.0)
+    let inner = column([ head, text(body).class("caption").max_width(300.0) ]).spacing(6.0)
+    let e = container(inner)
+    e.class = "glass"
+    end e.width(fixed(340.0))
+]
+
+fun osd(icon_name: Str, value: Float, label: Str) -> Element [
+    let inner = row([ icon(icon_name).size(26.0), progress_bar(0.0, 100.0, value).width(fixed(200.0)), text(label).bold() ]).spacing(14.0).align_y(1)
+    let e = container(inner)
+    e.class = "glass"
+    end e.padding_xy(22.0, 16.0).radius(999.0)
+]
+
+!! ekran blokady: zegar + data + pole hasla (secret) + komunikat
+fun lock_view(clock: Str, date: Str, password: Str, message: Str) -> Element [
+    let pw = text_input("Hasło", password).secret().on_input("pw").on_submit("unlock").width(fixed(300.0))
+    let c = column([
+        text(clock).size(96.0).bold().color(rgb(255, 255, 255)),
+        text(date).size(20.0).color(rgba(255, 255, 255, 200)),
+        vspace(40.0),
+        pw,
+        text(message).class("danger").size(13.0)
+    ]).spacing(10.0).align_x(1)
+    end container(c).center().background(rgba(10, 10, 20, 150))
+]
+
+!! lista wynikow launchera: `sel` = zaznaczony indeks
+fun launcher_view(query: Str, results: List<AppEntry>, sel: Int) -> Element [
+    let rows: List<Element> = []
+    let i = 0
+    while i < results.len() [
+        if i < 8 [
+            let it = results[i].clone()
+            let line = row([ icon("layout-grid").size(18.0), column([ text(it.name.clone()).bold(), text(short_title(it.comment.clone(), 58)).class("caption") ]).spacing(1.0) ]).spacing(12.0).align_y(1)
+            let b = button_with(line).on_press("run:" + (i as Str)).class("ghost").fill_width()
+            b.st.ax = 0
+            if i == sel [
+                b = b.background(rgba(137, 180, 250, 50))
+            ]
+            rows.push(b)
+        ]
+        i = i + 1
+    ]
+    let box = column([ text_input("Szukaj aplikacji…", query).on_input("q").on_submit("run_sel"), column(rows).spacing(2.0).fill_width() ]).spacing(12.0).fill_width()
+    let card = container(box)
+    card.class = "glass"
+    end container(card.width(fixed(560.0))).center().align_y(0).padding_4(120.0, 0.0, 0.0, 0.0)
+]
