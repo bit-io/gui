@@ -1,0 +1,448 @@
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::element>
+get <bit:gui::native>
+
+struct Size [
+    w: Float,
+    h: Float
+]
+
+struct Box [
+    x: Float,
+    y: Float,
+    w: Float,
+    h: Float,
+    el: Element,
+    kids: List<Box>,
+    lines: List<Str>,
+    cw: Float,
+    ch: Float,
+    sc: Float
+]
+
+fun box_new(e: Element, x: Float, y: Float, w: Float, h: Float) -> Box [
+    let kids: List<Box> = []
+    let lines: List<Str> = []
+    end Box(x, y, w, h, e, kids, lines, 0.0, 0.0, 0.0)
+]
+
+fun el_line_h(e: Element) -> Float [
+    end e.st.size * e.st.line_h
+]
+
+fun el_text_w(s: Str, e: Element) -> Float [
+    end gui_text_measure(s, e.st.size, e.st.weight, e.st.ls)
+]
+
+fun pad_w(e: Element) -> Float [
+    end e.st.pl + e.st.pr
+]
+
+fun pad_h(e: Element) -> Float [
+    end e.st.pt + e.st.pb
+]
+
+fun mar_w(e: Element) -> Float [
+    end e.st.ml + e.st.mr
+]
+
+fun mar_h(e: Element) -> Float [
+    end e.st.mt + e.st.mb
+]
+
+fun text_lines(s: Str, e: Element, avail: Float) -> List<Str> [
+    let mw = 0.0
+    if e.st.wrap == 1 and avail > 0.0 [
+        mw = avail
+    ]
+    end gui_text_wrap(s, e.st.size, e.st.weight, mw, e.st.ls)
+]
+
+fun max_line_w(lines: List<Str>, e: Element) -> Float [
+    let m = 0.0
+    let i = 0
+    while i < lines.len() [
+        m = fmax(m, el_text_w(lines[i].clone(), e))
+        i = i + 1
+    ]
+    end m
+]
+
+fun box_w_of(e: Element) -> Float [
+    if e.kind == "toggler" [
+        end 38.0
+    ]
+    end 20.0
+]
+
+!! Rozmiar naturalny (shrink) elementu przy dostepnej szerokosci `max_w` (0 = bez ograniczenia), BEZ marginesow.
+fun size_of(e: Element, max_w: Float) -> Size [
+    let w = 0.0
+    let h = 0.0
+    let inner_max = 0.0
+    if max_w > 0.0 [
+        inner_max = fmax(1.0, max_w - pad_w(e.clone()))
+    ]
+    if e.kind == "text" [
+        let lines = text_lines(e.text.clone(), e.clone(), inner_max)
+        w = max_line_w(lines.clone(), e.clone())
+        h = (lines.len() as Float) * el_line_h(e.clone())
+    ]
+    if e.kind == "icon" [
+        w = e.st.size
+        h = e.st.size
+    ]
+    if e.kind == "canvas" [
+        w = e.st.size
+        h = e.st.size
+    ]
+    if e.kind == "button" [
+        if e.kids.len() > 0 [
+            let k = size_of(e.kids[0].clone(), inner_max)
+            w = k.w
+            h = k.h
+        ] else [
+            w = el_text_w(e.text.clone(), e.clone())
+            h = el_line_h(e.clone())
+            if e.text2 != "" [
+                w = w + e.st.size + 8.0
+            ]
+            if e.text == "" [
+                w = e.st.size
+                h = e.st.size
+            ]
+        ]
+    ]
+    if e.kind == "text_input" [
+        w = fmax(180.0, el_text_w(e.text.clone(), e.clone()) + 24.0)
+        h = el_line_h(e.clone())
+    ]
+    if e.kind == "checkbox" or e.kind == "radio" or e.kind == "toggler" [
+        let bw = box_w_of(e.clone())
+        w = bw
+        if e.text != "" [
+            w = bw + e.st.gap + el_text_w(e.text.clone(), e.clone())
+        ]
+        h = fmax(bw, el_line_h(e.clone()))
+    ]
+    if e.kind == "slider" [
+        w = 160.0
+        h = 24.0
+    ]
+    if e.kind == "progress" [
+        w = 160.0
+        h = 8.0
+    ]
+    if e.kind == "pick_list" [
+        let m = el_text_w(e.text.clone(), e.clone())
+        let i = 0
+        while i < e.opts.len() [
+            m = fmax(m, el_text_w(e.opts[i].clone(), e.clone()))
+            i = i + 1
+        ]
+        w = m + 28.0
+        h = el_line_h(e.clone())
+    ]
+    if e.kind == "tabs" [
+        let i = 0
+        while i < e.opts.len() [
+            w = w + el_text_w(e.opts[i].clone(), e.clone()) + 28.0
+            i = i + 1
+        ]
+        if e.opts.len() > 1 [
+            w = w + e.st.gap * ((e.opts.len() - 1) as Float)
+        ]
+        h = el_line_h(e.clone()) + 14.0
+    ]
+    if e.kind == "rule" [
+        w = 1.0
+        h = 1.0
+    ]
+    if e.kind == "space" [
+        w = 0.0
+        h = 0.0
+    ]
+    if e.kind == "container" or e.kind == "tooltip" or e.kind == "scrollable" [
+        if e.kids.len() > 0 [
+            let k = size_of(e.kids[0].clone(), inner_max)
+            w = k.w + mar_w(e.kids[0].clone())
+            h = k.h + mar_h(e.kids[0].clone())
+        ]
+    ]
+    if e.kind == "stack" [
+        let i = 0
+        while i < e.kids.len() [
+            let k = size_of(e.kids[i].clone(), inner_max)
+            w = fmax(w, k.w + mar_w(e.kids[i].clone()))
+            h = fmax(h, k.h + mar_h(e.kids[i].clone()))
+            i = i + 1
+        ]
+    ]
+    if e.kind == "column" [
+        let n = e.kids.len()
+        let i = 0
+        while i < n [
+            let k = size_of(e.kids[i].clone(), inner_max)
+            w = fmax(w, k.w + mar_w(e.kids[i].clone()))
+            h = h + k.h + mar_h(e.kids[i].clone())
+            i = i + 1
+        ]
+        if n > 1 [
+            h = h + e.st.gap * ((n - 1) as Float)
+        ]
+    ]
+    if e.kind == "row" [
+        let n = e.kids.len()
+        let i = 0
+        while i < n [
+            let k = size_of(e.kids[i].clone(), inner_max)
+            w = w + k.w + mar_w(e.kids[i].clone())
+            h = fmax(h, k.h + mar_h(e.kids[i].clone()))
+            i = i + 1
+        ]
+        if n > 1 [
+            w = w + e.st.gap * ((n - 1) as Float)
+        ]
+    ]
+    w = w + pad_w(e.clone())
+    h = h + pad_h(e.clone())
+    if e.st.w.kind == 1 [
+        w = e.st.w.v
+    ]
+    if e.st.h.kind == 1 [
+        h = e.st.h.v
+    ]
+    if e.st.min_w > 0.0 [
+        w = fmax(w, e.st.min_w)
+    ]
+    if e.st.min_h > 0.0 [
+        h = fmax(h, e.st.min_h)
+    ]
+    if e.st.max_w > 0.0 [
+        w = fmin(w, e.st.max_w)
+    ]
+    if e.st.max_h > 0.0 [
+        h = fmin(h, e.st.max_h)
+    ]
+    end Size(w, h)
+]
+
+fun clamp_dim(e: Element, w: Float, h: Float) -> Size [
+    let rw = w
+    let rh = h
+    if e.st.min_w > 0.0 [
+        rw = fmax(rw, e.st.min_w)
+    ]
+    if e.st.min_h > 0.0 [
+        rh = fmax(rh, e.st.min_h)
+    ]
+    if e.st.max_w > 0.0 [
+        rw = fmin(rw, e.st.max_w)
+    ]
+    if e.st.max_h > 0.0 [
+        rh = fmin(rh, e.st.max_h)
+    ]
+    end Size(rw, rh)
+]
+
+!! Ostateczny rozmiar dziecka (bez marginesow) w prostokacie `aw` x `ah` (0 = brak limitu)
+fun child_dims(k: Element, aw: Float, ah: Float) -> Size [
+    let w = 0.0
+    let nat = size_of(k.clone(), aw - mar_w(k.clone()))
+    if k.st.w.kind == 2 [
+        w = fmax(0.0, aw - mar_w(k.clone()))
+    ] else [
+        w = nat.w
+        if aw > 0.0 and w > aw - mar_w(k.clone()) [
+            w = fmax(0.0, aw - mar_w(k.clone()))
+        ]
+    ]
+    let nat2 = size_of(k.clone(), w)
+    let h = nat2.h
+    if k.st.h.kind == 2 and ah > 0.0 [
+        h = fmax(0.0, ah - mar_h(k.clone()))
+    ]
+    end clamp_dim(k.clone(), w, h)
+]
+
+fun align_off(a: Int, space: Float) -> Float [
+    if a == 1 [
+        end space / 2.0
+    ]
+    if a == 2 [
+        end space
+    ]
+    end 0.0
+]
+
+fun place(e: Element, x: Float, y: Float, w: Float, h: Float, sc: Dict<Str, Float>) -> Box [
+    let b = box_new(e.clone(), x, y, w, h)
+    let ix = x + e.st.pl
+    let iy = y + e.st.pt
+    let iw = fmax(0.0, w - pad_w(e.clone()))
+    let ih = fmax(0.0, h - pad_h(e.clone()))
+    if e.kind == "text" [
+        b.lines = text_lines(e.text.clone(), e.clone(), iw)
+    ]
+    if e.kind == "container" or e.kind == "tooltip" or e.kind == "button" [
+        if e.kids.len() > 0 [
+            let k = e.kids[0].clone()
+            let d = child_dims(k.clone(), iw, ih)
+            let ox = ix + k.st.ml + align_off(e.st.ax, iw - d.w - mar_w(k.clone()))
+            let oy = iy + k.st.mt + align_off(e.st.ay, ih - d.h - mar_h(k.clone()))
+            b.kids.push(place(k.clone(), ox, oy, d.w, d.h, sc.clone()))
+        ]
+    ]
+    if e.kind == "stack" [
+        let i = 0
+        while i < e.kids.len() [
+            let k = e.kids[i].clone()
+            let d = child_dims(k.clone(), iw, ih)
+            let ox = ix + k.st.ml + align_off(e.st.ax, iw - d.w - mar_w(k.clone()))
+            let oy = iy + k.st.mt + align_off(e.st.ay, ih - d.h - mar_h(k.clone()))
+            b.kids.push(place(k.clone(), ox, oy, d.w, d.h, sc.clone()))
+            i = i + 1
+        ]
+    ]
+    if e.kind == "scrollable" [
+        if e.kids.len() > 0 [
+            let k = e.kids[0].clone()
+            let nat = size_of(k.clone(), iw - mar_w(k.clone()))
+            let cw = iw - mar_w(k.clone())
+            if k.st.w.kind != 2 [
+                cw = fmin(cw, nat.w)
+            ]
+            let nat2 = size_of(k.clone(), cw)
+            let ch = nat2.h
+            let maxs = fmax(0.0, ch + mar_h(k.clone()) - ih)
+            let off = 0.0
+            match sc.fetch(e.id.clone()) [
+                Some(v) -> [
+                    off = v
+                ]
+                None -> [
+                ]
+            ]
+            off = fclamp(off, 0.0, maxs)
+            b.sc = off
+            b.cw = cw
+            b.ch = ch + mar_h(k.clone())
+            b.kids.push(place(k.clone(), ix + k.st.ml, iy + k.st.mt - off, cw, ch, sc.clone()))
+        ]
+    ]
+    if e.kind == "column" or e.kind == "row" [
+        let vert = e.kind == "column"
+        let n = e.kids.len()
+        let gap = e.st.gap
+        let used = 0.0
+        let total_p = 0.0
+        let mains: List<Float> = []
+        let flex: List<Float> = []
+        let i = 0
+        while i < n [
+            let k = e.kids[i].clone()
+            let nat = size_of(k.clone(), iw - mar_w(k.clone()))
+            let m = 0.0
+            let fp = 0.0
+            if vert [
+                if k.st.h.kind == 2 [
+                    fp = k.st.h.v
+                    m = k.st.min_h
+                ] else [
+                    let d = child_dims(k.clone(), iw, 0.0)
+                    m = d.h
+                ]
+                used = used + m + mar_h(k.clone())
+            ] else [
+                if k.st.w.kind == 2 [
+                    fp = k.st.w.v
+                    m = k.st.min_w
+                ] else [
+                    let d = child_dims(k.clone(), iw, ih)
+                    m = d.w
+                ]
+                used = used + m + mar_w(k.clone())
+            ]
+            total_p = total_p + fp
+            mains.push(m)
+            flex.push(fp)
+            i = i + 1
+        ]
+        if n > 1 [
+            used = used + gap * ((n - 1) as Float)
+        ]
+        let avail_main = ih
+        if not vert [
+            avail_main = iw
+        ]
+        let remain = fmax(0.0, avail_main - used)
+        i = 0
+        while i < n [
+            if flex[i] > 0.0 [
+                mains[i] = mains[i] + remain * flex[i] / total_p
+            ]
+            i = i + 1
+        ]
+        let content = used
+        if total_p > 0.0 [
+            content = avail_main
+        ]
+        let start = 0.0
+        if total_p == 0.0 [
+            let pack = e.st.ay
+            if not vert [
+                pack = e.st.ax
+            ]
+            start = align_off(pack, avail_main - content)
+        ]
+        let pos = start
+        i = 0
+        while i < n [
+            let k = e.kids[i].clone()
+            let kd = Size(0.0, 0.0)
+            let kx = 0.0
+            let ky = 0.0
+            if vert [
+                let cw = iw - mar_w(k.clone())
+                let ww = 0.0
+                if k.st.w.kind == 2 [
+                    ww = fmax(0.0, cw)
+                ] else [
+                    let d = size_of(k.clone(), cw)
+                    ww = fmin(d.w, fmax(0.0, cw))
+                ]
+                kd = clamp_dim(k.clone(), ww, fmax(0.0, mains[i]))
+                kx = ix + k.st.ml + align_off(e.st.ax, iw - kd.w - mar_w(k.clone()))
+                ky = iy + pos + k.st.mt
+                pos = pos + mains[i] + mar_h(k.clone()) + gap
+            ] else [
+                let mw = fmax(0.0, mains[i])
+                let hh = 0.0
+                let ch = ih - mar_h(k.clone())
+                if k.st.h.kind == 2 [
+                    hh = fmax(0.0, ch)
+                ] else [
+                    let d = size_of(k.clone(), mw)
+                    hh = fmin(d.h, fmax(ch, d.h))
+                ]
+                if k.kind == "rule" [
+                    hh = fmax(0.0, ch)
+                    mw = 1.0
+                ]
+                kd = clamp_dim(k.clone(), mw, hh)
+                kx = ix + pos + k.st.ml
+                ky = iy + k.st.mt + align_off(e.st.ay, ih - kd.h - mar_h(k.clone()))
+                pos = pos + mains[i] + mar_w(k.clone()) + gap
+            ]
+            b.kids.push(place(k.clone(), kx, ky, kd.w, kd.h, sc.clone()))
+            i = i + 1
+        ]
+    ]
+    end b
+]
+
+!! Uklad korzenia: zajmuje cale okno
+fun layout_root(root: Element, w: Float, h: Float, sc: Dict<Str, Float>) -> Box [
+    end place(root, 0.0, 0.0, w, h, sc)
+]
