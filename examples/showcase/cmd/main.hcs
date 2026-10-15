@@ -1,0 +1,114 @@
+get <bit:gui>
+
+struct State [
+    tab: Int,
+    name: Str,
+    pw: Str,
+    volume: Float,
+    bright: Float,
+    agree: Bool,
+    notify: Bool,
+    choice: Str,
+    lang: Str,
+    clicks: Int,
+    theme: Str,
+    progress: Float
+]
+
+fun update(state: State, m: Message) -> State [
+    let s = state.clone()
+    if m.id == "tab" [
+        s.tab = m.idx
+    ]
+    if m.id == "name" [
+        s.name = m.text.clone()
+    ]
+    if m.id == "pw" [
+        s.pw = m.text.clone()
+    ]
+    if m.id == "volume" [
+        s.volume = m.num
+    ]
+    if m.id == "bright" [
+        s.bright = m.num
+    ]
+    if m.id == "agree" [
+        s.agree = m.flag
+    ]
+    if m.id == "notify" [
+        s.notify = m.flag
+    ]
+    if m.id == "choice" [
+        s.choice = m.text.clone()
+    ]
+    if m.id == "lang" [
+        s.lang = m.text.clone()
+    ]
+    if m.id == "click" [
+        s.clicks = s.clicks + 1
+        s.progress = fmin(100.0, s.progress + 10.0)
+    ]
+    if m.id == "theme" [
+        s.theme = m.text.clone()
+    ]
+    end s
+]
+
+fun page_basics(s: State) -> Element [
+    let buttons = row([ button("Domyślny").on_press("click"), button("Główny").class("primary").on_press("click").with_icon("check"), button("Sukces").class("success").on_press("click"), button("Usuń").class("danger").with_icon("trash").on_press("click"), button("Duch").class("ghost").on_press("click") ]).spacing(10.0)
+    let inputs = column([ text_input("Imię i nazwisko", s.name.clone()).on_input("name"), text_input("Hasło", s.pw.clone()).secret().on_input("pw") ]).spacing(10.0)
+    let toggles = row([ checkbox("Zgadzam się", s.agree).on_toggle("agree"), toggler("Powiadomienia", s.notify).on_toggle("notify"), radio("Opcja A", s.choice == "a").on_select("choice") ]).spacing(24.0)
+    let sliders = column([ row([ icon("volume-2"), slider(0.0, 100.0, s.volume).on_change("volume") , text(fmt_float(s.volume, 0)).width(fixed(32.0)) ]).spacing(12.0), row([ icon("sun"), slider(0.0, 100.0, s.bright).on_change("bright"), text(fmt_float(s.bright, 0)).width(fixed(32.0)) ]).spacing(12.0) ]).spacing(8.0)
+    let bar = column([ text("Postęp: " + (s.clicks as Str) + " kliknięć").class("caption"), progress_bar(0.0, 100.0, s.progress) ]).spacing(6.0)
+    end column([ buttons, inputs, toggles, sliders, bar ]).spacing(20.0)
+]
+
+fun page_cards(s: State) -> Element [
+    let a = card(column([ heading("Karta"), text("Cień, obramowanie, zaokrąglenia i gradient pochodzą z motywu.").class("caption"), row([ badge("nowe"), badge("beta") ]).spacing(6.0) ]).spacing(8.0)).width(fixed(250.0))
+    let g = container(column([ text("Gradient").bold().color(rgb(17, 17, 27)), text("lgrad 135°").color(rgb(17, 17, 27)) ]).spacing(4.0)).padding(18.0).radius(16.0).gradient(parse_color("#f5c2e7"), parse_color("#89b4fa"), 135.0).width(fixed(200.0))
+    let gl = container(column([ text("Szkło").bold(), text("rozmycie tła").class("caption") ]).spacing(4.0))
+    gl.class = "glass"
+    let lst = pick_list(["polski", "english", "deutsch", "français"], s.lang.clone()).on_select("lang")
+    end column([ row([ a, g ]).spacing(16.0), row([ gl.width(fixed(200.0)), lst ]).spacing(16.0) ]).spacing(16.0)
+]
+
+fun page_scroll(s: State) -> Element [
+    let rows: List<Element> = []
+    let i = 0
+    while i < 30 [
+        let r = container(row([ icon("file").size(18.0), text("Element listy numer " + (i as Str)), space().fill_width(), text((i * 7) as Str + " KB").class("caption") ]).spacing(10.0)).padding_xy(12.0, 9.0).fill_width()
+        r.class = "panel"
+        rows.push(r.radius(8.0))
+        i = i + 1
+    ]
+    end scrollable(column(rows).spacing(6.0).fill_width()).height(fixed(300.0))
+]
+
+fun view(s: State) -> Element [
+    let tabs_el = tabs(["Podstawy", "Karty i szkło", "Przewijanie"], s.tab).on_select("tab")
+    let page = page_basics(s)
+    if s.tab == 1 [
+        page = page_cards(s)
+    ]
+    if s.tab == 2 [
+        page = page_scroll(s)
+    ]
+    let themes = pick_list(["dark", "light", "nord", "dracula", "tokyo"], s.theme.clone()).on_select("theme")
+    let head = row([ heading("gui — galeria"), space().fill_width(), themes ]).align_y(1)
+    end column([ head, tabs_el, page ]).spacing(18.0).padding(24.0).fill_all()
+]
+
+fun main() [
+    let app = app_new("gui — galeria", 760, 560)
+    app.set_css(".card { border-radius: 18px; } button.primary { border-radius: 999px; }")
+    let s = State(0, "", "", 35.0, 70.0, true, false, "a", "polski", 0, "dark", 20.0)
+    while app.running() [
+        let old = s.theme.clone()
+        for m in app.frame1(view(s.clone())) [
+            s = update(s.clone(), m)
+        ]
+        if s.theme != old [
+            app.set_theme(theme_by_name(s.theme.clone()))
+        ]
+    ]
+]
