@@ -1,1 +1,20 @@
+[package]
+-> name        => gui
+-> version     => 0.1
+-> description => Lekka biblioteka GUI dla HackerScript (Wayland, XWayland, X11) - styl iced, wyglad Slint/CSS, 100% .hcs
+-> authors     => ["HackerOS Team"]
+-> license     => MIT
+-> lang        => HackerScript
+-> using       => 0.5
 
+[layout]
+-> lib => lib
+
+[lib]
+-> output => hlib
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
