@@ -1,0 +1,1354 @@
+get <bit:gui::native>
+get <bit:gui::fonts>
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::theme>
+get <bit:gui::element>
+get <bit:gui::css>
+get <bit:gui::resolve>
+get <bit:gui::layout>
+get <bit:gui::render>
+
+struct Hit [
+    id: Str,
+    kind: Str,
+    sub: Int
+]
+
+struct WinState [
+    id: Int,
+    kind: Str,
+    title: Str,
+    w: Float,
+    h: Float,
+    scale: Float,
+    ready: Bool,
+    closed: Bool,
+    clear: Int,
+    hover: Str,
+    hover_kind: Str,
+    sub: Int,
+    pressed: Str,
+    focus: Str,
+    mx: Float,
+    my: Float,
+    scroll: Dict<Str, Float>,
+    anim: Dict<Str, Float>,
+    caret: Dict<Str, Int>,
+    sel: Dict<Str, Int>,
+    edit: Dict<Str, Str>,
+    open_pick: Str,
+    pick_hover: Int,
+    tip: Str,
+    tip_cand: Str,
+    tip_ms: Int,
+    last: Box,
+    has_last: Bool,
+    dirty: Bool,
+    drag: Str,
+    cursor: Str,
+    active: Bool
+]
+
+struct App [
+    backend: Str,
+    theme: Theme,
+    sheet: Sheet,
+    wins: List<WinState>,
+    run: Bool,
+    main: Int,
+    last_ms: Int,
+    caret_ms: Int,
+    caret_on: Bool,
+    force: Bool,
+    mods: Int,
+    tick_ms: Int,
+    last_tick: Int
+]
+
+struct EditRes [
+    text: Str,
+    caret: Int,
+    anchor: Int,
+    changed: Bool,
+    submit: Bool
+]
+
+fun win_state_new(id: Int, kind: Str, title: Str, w: Float, h: Float, clear: Int) -> WinState [
+    let sc: Dict<Str, Float> = dict()
+    let an: Dict<Str, Float> = dict()
+    let ca: Dict<Str, Int> = dict()
+    let se: Dict<Str, Int> = dict()
+    let ed: Dict<Str, Str> = dict()
+    let dummy = box_new(el_new("space"), 0.0, 0.0, 0.0, 0.0)
+    end WinState(id, kind, title, w, h, 1.0, false, false, clear, "", "", -1, "", "", 0.0, 0.0, sc, an, ca, se, ed, "", -1, "", "", 0, dummy, false, true, "", "default", false)
+]
+
+!! ---------------------------------------------------------------- szukanie / trafienia
+fun find_box(b: Box, id: Str) -> Option<Box> [
+    if b.el.id == id [
+        end some(b.clone())
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        match find_box(b.kids[i].clone(), id) [
+            Some(f) -> [
+                end some(f)
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+fun is_interactive(e: Element) -> Bool [
+    if e.disabled [
+        end false
+    ]
+    if e.kind == "button" or e.kind == "text_input" or e.kind == "pick_list" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" or e.kind == "slider" or e.kind == "tabs" [
+        end true
+    ]
+    if e.msg != "" and (e.kind == "container" or e.kind == "row" or e.kind == "column" or e.kind == "stack" or e.kind == "text" or e.kind == "icon") [
+        end true
+    ]
+    end false
+]
+
+fun is_focusable(e: Element) -> Bool [
+    if e.disabled [
+        end false
+    ]
+    end e.kind == "button" or e.kind == "text_input" or e.kind == "pick_list" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" or e.kind == "slider"
+]
+
+fun inside(b: Box, x: Float, y: Float) -> Bool [
+    end x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h
+]
+
+fun hit_test(b: Box, x: Float, y: Float) -> Hit [
+    let none_hit = Hit("", "", -1)
+    if not inside(b.clone(), x, y) [
+        end none_hit
+    ]
+    let i = b.kids.len() - 1
+    while i >= 0 [
+        let h = hit_test(b.kids[i].clone(), x, y)
+        if h.id != "" [
+            end h
+        ]
+        i = i - 1
+    ]
+    if is_interactive(b.el.clone()) [
+        let sub = -1
+        if b.el.kind == "tabs" [
+            let k = 0
+            while k < b.el.opts.len() [
+                let tx = tab_x(b.clone(), k)
+                if x >= tx and x < tx + tab_w(b.clone(), k) [
+                    sub = k
+                ]
+                k = k + 1
+            ]
+            if sub < 0 [
+                end none_hit
+            ]
+        ]
+        end Hit(b.el.id.clone(), b.el.kind.clone(), sub)
+    ]
+    end none_hit
+]
+
+!! id najglebszego scrollable pod punktem
+fun hit_scroll(b: Box, x: Float, y: Float) -> Str [
+    if not inside(b.clone(), x, y) [
+        end ""
+    ]
+    let i = b.kids.len() - 1
+    while i >= 0 [
+        let r = hit_scroll(b.kids[i].clone(), x, y)
+        if r != "" [
+            end r
+        ]
+        i = i - 1
+    ]
+    if b.el.kind == "scrollable" [
+        end b.el.id.clone()
+    ]
+    end ""
+]
+
+fun hit_tip(b: Box, x: Float, y: Float) -> Str [
+    if not inside(b.clone(), x, y) [
+        end ""
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        let r = hit_tip(b.kids[i].clone(), x, y)
+        if r != "" [
+            end r
+        ]
+        i = i + 1
+    ]
+    if b.el.kind == "tooltip" [
+        end b.el.id.clone()
+    ]
+    end ""
+]
+
+fun collect_focusable(b: Box, out: List<Str>) [
+    if is_focusable(b.el.clone()) [
+        out.push(b.el.id.clone())
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        collect_focusable(b.kids[i].clone(), out)
+        i = i + 1
+    ]
+]
+
+!! cele animacji: h: p: f: t: dla elementow interaktywnych
+fun collect_targets(b: Box, hover: Str, sub: Int, pressed: Str, focus: Str, out: Dict<Str, Float>) [
+    let e = b.el.clone()
+    if is_interactive(e.clone()) or e.kind == "scrollable" [
+        let id = e.id.clone()
+        let hv = 0.0
+        if hover == id [
+            hv = 1.0
+        ]
+        out.insert("h:" + id, hv)
+        let pv = 0.0
+        if pressed == id and hover == id [
+            pv = 1.0
+        ]
+        out.insert("p:" + id, pv)
+        let fv = 0.0
+        if focus == id [
+            fv = 1.0
+        ]
+        out.insert("f:" + id, fv)
+        if e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" [
+            let tv = 0.0
+            if e.on [
+                tv = 1.0
+            ]
+            out.insert("t:" + id, tv)
+        ]
+        if e.kind == "tabs" [
+            let k = 0
+            while k < e.opts.len() [
+                let key = id + "#" + (k as Str)
+                let h2 = 0.0
+                if hover == id and sub == k [
+                    h2 = 1.0
+                ]
+                out.insert("h:" + key, h2)
+                let t2 = 0.0
+                if (e.v as Int) == k [
+                    t2 = 1.0
+                ]
+                out.insert("t:" + key, t2)
+                k = k + 1
+            ]
+        ]
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        collect_targets(b.kids[i].clone(), hover, sub, pressed, focus, out)
+        i = i + 1
+    ]
+]
+
+!! ---------------------------------------------------------------- edycja tekstu
+fun is_word_char(c: Str) -> Bool [
+    end c != " " and c != "\n" and c != "\t" and c != "" and c != "," and c != "." and c != ";" and c != ":" and c != "-"
+]
+
+fun word_left(t: Str, pos: Int) -> Int [
+    let p = pos
+    while p > 0 and not is_word_char(t.char_at(p - 1)) [
+        p = p - 1
+    ]
+    while p > 0 and is_word_char(t.char_at(p - 1)) [
+        p = p - 1
+    ]
+    end p
+]
+
+fun word_right(t: Str, pos: Int) -> Int [
+    let n = slen(t)
+    let p = pos
+    while p < n and not is_word_char(t.char_at(p)) [
+        p = p + 1
+    ]
+    while p < n and is_word_char(t.char_at(p)) [
+        p = p + 1
+    ]
+    end p
+]
+
+fun sel_lo(a: Int, b: Int) -> Int [
+    end imin(a, b)
+]
+
+fun sel_hi(a: Int, b: Int) -> Int [
+    end imax(a, b)
+]
+
+!! mods: 1 shift, 2 ctrl, 4 alt, 8 super
+fun edit_apply(text: Str, caret: Int, anchor: Int, name: Str, ins: Str, mods: Int) -> EditRes [
+    let n = slen(text)
+    let c = iclamp(caret, 0, n)
+    let a = iclamp(anchor, 0, n)
+    let shift = mods % 2 == 1
+    let ctrl = (mods / 2) % 2 == 1
+    let t = text
+    let changed = false
+    let submit = false
+    let has_sel = c != a
+    if name == "Backspace" [
+        if has_sel [
+            t = t.slice(0, sel_lo(c, a)) + t.slice(sel_hi(c, a), n)
+            c = sel_lo(c, a)
+            changed = true
+        ] else [
+            if c > 0 [
+                let from = c - 1
+                if ctrl [
+                    from = word_left(t.clone(), c)
+                ]
+                t = t.slice(0, from) + t.slice(c, n)
+                c = from
+                changed = true
+            ]
+        ]
+        a = c
+    ] else [
+        if name == "Delete" [
+            if has_sel [
+                t = t.slice(0, sel_lo(c, a)) + t.slice(sel_hi(c, a), n)
+                c = sel_lo(c, a)
+                changed = true
+            ] else [
+                if c < n [
+                    let to = c + 1
+                    if ctrl [
+                        to = word_right(t.clone(), c)
+                    ]
+                    t = t.slice(0, c) + t.slice(to, n)
+                    changed = true
+                ]
+            ]
+            a = c
+        ] else [
+            if name == "ArrowLeft" or name == "ArrowRight" or name == "Home" or name == "End" [
+                let np = c
+                if name == "ArrowLeft" [
+                    if ctrl [
+                        np = word_left(t.clone(), c)
+                    ] else [
+                        if has_sel and not shift [
+                            np = sel_lo(c, a)
+                        ] else [
+                            np = imax(0, c - 1)
+                        ]
+                    ]
+                ]
+                if name == "ArrowRight" [
+                    if ctrl [
+                        np = word_right(t.clone(), c)
+                    ] else [
+                        if has_sel and not shift [
+                            np = sel_hi(c, a)
+                        ] else [
+                            np = imin(n, c + 1)
+                        ]
+                    ]
+                ]
+                if name == "Home" [
+                    np = 0
+                ]
+                if name == "End" [
+                    np = n
+                ]
+                c = np
+                if not shift [
+                    a = c
+                ]
+            ] else [
+                if name == "Enter" [
+                    submit = true
+                ] else [
+                    if slen(ins) > 0 [
+                        if has_sel [
+                            t = t.slice(0, sel_lo(c, a)) + t.slice(sel_hi(c, a), n)
+                            c = sel_lo(c, a)
+                        ]
+                        let m = slen(t)
+                        t = t.slice(0, c) + ins + t.slice(c, m)
+                        c = c + slen(ins)
+                        a = c
+                        changed = true
+                    ]
+                ]
+            ]
+        ]
+    ]
+    end EditRes(t, c, a, changed, submit)
+]
+
+fun caret_from_x(e: Element, text: Str, bx: Float, x: Float) -> Int [
+    let n = slen(text)
+    let ix = bx + e.st.pl
+    let cx = text_prefix_w(e.clone(), text.clone(), n)
+    let iw = 0.0
+    let target = x - ix
+    let i = 0
+    let best = 0
+    let bestd = 1000000.0
+    while i <= n [
+        let w = text_prefix_w(e.clone(), text.clone(), i)
+        let d = fabs(w - target)
+        if d < bestd [
+            bestd = d
+            best = i
+        ]
+        i = i + 1
+    ]
+    end best
+]
+
+fun app_new_state(theme: Theme) -> App [
+    let ws: List<WinState> = []
+    end App("", theme, sheet_empty(), ws, true, 0, gui_now_ms(), gui_now_ms(), true, true, 0, 0, gui_now_ms())
+]
+
+!! Podstawowy konstruktor: czcionki + backend (auto: Wayland -> X11 -> headless) + glowne okno
+fun app_new(title: Str, w: Int, h: Int) -> App [
+    end app_new_opts(title, w, h, "toplevel", "")
+]
+
+fun app_new_opts(title: Str, w: Int, h: Int, kind: Str, opts: Str) -> App [
+    gui_fonts_init(font_regular_b64(), font_semibold_b64(), icon_table())
+    let want = gui_env("GUI_BACKEND")
+    if want == "" [
+        want = "auto"
+    ]
+    let app = app_new_state(theme_dark())
+    app.backend = gui_init(want)
+    app.main = app.open_window(kind, title, w, h, opts)
+    end app
+]
+
+!! Aplikacja bez okna startowego (np. powloka tworzaca same panele)
+fun app_new_headless_shell() -> App [
+    gui_fonts_init(font_regular_b64(), font_semibold_b64(), icon_table())
+    let want = gui_env("GUI_BACKEND")
+    if want == "" [
+        want = "auto"
+    ]
+    let app = app_new_state(theme_dark())
+    app.backend = gui_init(want)
+    end app
+]
+
+impl App [
+    pub fun running(self) -> Bool [
+        end self.run
+    ]
+
+    pub fun set_theme(self, t: Theme) [
+        self.theme = t
+        self.force = true
+        let i = 0
+        while i < self.wins.len() [
+            self.wins[i].dirty = true
+            i = i + 1
+        ]
+    ]
+
+    !! arkusz CSS (patrz gui::css)
+    pub fun set_css(self, src: Str) [
+        self.sheet = css_parse(src)
+        self.force = true
+    ]
+
+    pub fun open_window(self, kind: Str, title: Str, w: Int, h: Int, opts: Str) -> Int [
+        let id = gui_win_create(kind, title, w, h, opts)
+        if id < 0 [
+            end -1
+        ]
+        let clear = self.theme.p.bg
+        if kind == "layer" or kind == "popup" [
+            clear = 0
+        ]
+        self.wins.push(win_state_new(id, kind, title, w as Float, h as Float, clear))
+        end id
+    ]
+
+    pub fun close_window(self, id: Int) [
+        gui_win_close(id)
+        let keep: List<WinState> = []
+        let i = 0
+        while i < self.wins.len() [
+            if self.wins[i].id != id [
+                keep.push(self.wins[i].clone())
+            ]
+            i = i + 1
+        ]
+        self.wins = keep
+    ]
+
+    pub fun window_ids(self) -> List<Int> [
+        let out: List<Int> = []
+        let i = 0
+        while i < self.wins.len() [
+            out.push(self.wins[i].id)
+            i = i + 1
+        ]
+        end out
+    ]
+
+    pub fun win_index(self, id: Int) -> Int [
+        let i = 0
+        while i < self.wins.len() [
+            if self.wins[i].id == id [
+                end i
+            ]
+            i = i + 1
+        ]
+        end -1
+    ]
+
+    pub fun win_width(self, id: Int) -> Float [
+        let i = self.win_index(id)
+        if i >= 0 [
+            end self.wins[i].w
+        ]
+        end 0.0
+    ]
+
+    pub fun win_height(self, id: Int) -> Float [
+        let i = self.win_index(id)
+        if i >= 0 [
+            end self.wins[i].h
+        ]
+        end 0.0
+    ]
+
+    pub fun set_title(self, id: Int, t: Str) [
+        gui_win_title(id, t)
+    ]
+
+    pub fun resize(self, id: Int, w: Int, h: Int) [
+        gui_win_resize(id, w, h)
+        let i = self.win_index(id)
+        if i >= 0 [
+            self.wins[i].dirty = true
+        ]
+    ]
+
+    !! co `ms` milisekund `frame` zwroci Message("tick") (zegary, animacje wlasne); 0 = wylaczone
+    pub fun set_tick(self, ms: Int) [
+        self.tick_ms = ms
+        self.last_tick = gui_now_ms()
+    ]
+
+    pub fun request_redraw(self) [
+        self.force = true
+    ]
+
+    pub fun focus_id(self, win: Int, id: Str) [
+        let i = self.win_index(win)
+        if i >= 0 [
+            self.wins[i].focus = id
+            self.wins[i].dirty = true
+        ]
+    ]
+
+    pub fun quit(self) [
+        self.run = false
+    ]
+
+    !! rysuje okno `wi` z drzewem `ui`
+    pub fun draw_win(self, wi: Int, ui: Element, now: Int) [
+        let ctx = Ctx(self.theme.clone(), self.sheet.clone(), self.wins[wi].hover.clone(), self.wins[wi].pressed.clone(), self.wins[wi].focus.clone())
+        let root = resolve_el(ui, ctx, "@")
+        let box = layout_root(root, self.wins[wi].w, self.wins[wi].h, self.wins[wi].scroll.clone())
+        self.wins[wi].last = box.clone()
+        self.wins[wi].has_last = true
+        let targets: Dict<Str, Float> = dict()
+        collect_targets(box.clone(), self.wins[wi].hover.clone(), self.wins[wi].sub, self.wins[wi].pressed.clone(), self.wins[wi].focus.clone(), targets)
+        let dt = (now - self.last_ms) as Float
+        if dt > 60.0 [
+            dt = 60.0
+        ]
+        if dt < 1.0 [
+            dt = 1.0
+        ]
+        let step = dt / self.theme.anim_ms
+        let active = false
+        let keys = targets.keys()
+        let k = 0
+        while k < keys.len() [
+            let key = keys[k].clone()
+            let tv = 0.0
+            match targets.fetch(key.clone()) [
+                Some(v) -> [
+                    tv = v
+                ]
+                None -> [
+                ]
+            ]
+            let cur = tv
+            let have = false
+            match self.wins[wi].anim.fetch(key.clone()) [
+                Some(v) -> [
+                    cur = v
+                    have = true
+                ]
+                None -> [
+                ]
+            ]
+            if have and fabs(cur - tv) > 0.001 [
+                if cur < tv [
+                    cur = fmin(tv, cur + step)
+                ] else [
+                    cur = fmax(tv, cur - step)
+                ]
+                active = true
+            ]
+            self.wins[wi].anim.insert(key, cur)
+            k = k + 1
+        ]
+        self.wins[wi].active = active
+        let show_tip = ""
+        if self.wins[wi].tip != "" [
+            show_tip = self.wins[wi].tip.clone()
+        ]
+        let rc = RCtx(self.theme.clone(), self.wins[wi].hover.clone(), self.wins[wi].pressed.clone(), self.wins[wi].focus.clone(), self.wins[wi].anim.clone(), self.wins[wi].caret.clone(), self.wins[wi].sel.clone(), self.wins[wi].open_pick.clone(), show_tip, self.caret_on, self.wins[wi].mx, self.wins[wi].my, self.wins[wi].w, self.wins[wi].h, self.wins[wi].pick_hover)
+        let clr = self.theme.p.bg
+        if self.wins[wi].kind == "layer" or self.wins[wi].kind == "popup" [
+            clr = 0
+        ]
+        let ops = render_scene(box, rc, clr)
+        let st = gui_win_draw(self.wins[wi].id, ops.f, ops.s)
+        if st == 0 [
+            self.wins[wi].dirty = false
+        ] else [
+            self.wins[wi].dirty = true
+        ]
+    ]
+
+    pub fun pending_wait(self, now: Int) -> Int [
+        let t = -1
+        let i = 0
+        while i < self.wins.len() [
+            let w = self.wins[i].clone()
+            if w.dirty or w.active [
+                t = 8
+            ]
+            if w.focus != "" [
+                let rem = 530 - (now - self.caret_ms)
+                if rem < 1 [
+                    rem = 1
+                ]
+                if t < 0 or rem < t [
+                    t = rem
+                ]
+            ]
+            if w.tip_cand != "" and w.tip == "" [
+                let rem2 = 450 - (now - w.tip_ms)
+                if rem2 < 1 [
+                    rem2 = 1
+                ]
+                if t < 0 or rem2 < t [
+                    t = rem2
+                ]
+            ]
+            i = i + 1
+        ]
+        if self.tick_ms > 0 [
+            let rem3 = self.tick_ms - (now - self.last_tick)
+            if rem3 < 1 [
+                rem3 = 1
+            ]
+            if t < 0 or rem3 < t [
+                t = rem3
+            ]
+        ]
+        end t
+    ]
+
+    !! glowny krok: `uis` w kolejnosci `window_ids()`
+    pub fun frame(self, uis: List<Element>) -> List<Message> [
+        let out: List<Message> = []
+        let now = gui_now_ms()
+        let i = 0
+        while i < self.wins.len() [
+            if i < uis.len() and self.wins[i].ready [
+                if self.wins[i].dirty or self.force or self.wins[i].active [
+                    self.draw_win(i, uis[i].clone(), now)
+                    self.wins[i].edit = dict()
+                ]
+            ]
+            i = i + 1
+        ]
+        self.last_ms = now
+        self.force = false
+        let timeout = self.pending_wait(now)
+        let evs = gui_poll(timeout)
+        let e = 0
+        while e < evs.len() [
+            self.handle_event(evs[e].clone(), out)
+            e = e + 1
+        ]
+        let now2 = gui_now_ms()
+        if now2 - self.caret_ms >= 530 [
+            self.caret_ms = now2
+            self.caret_on = not self.caret_on
+            let j = 0
+            while j < self.wins.len() [
+                if self.wins[j].focus != "" [
+                    self.wins[j].dirty = true
+                ]
+                j = j + 1
+            ]
+        ]
+        let j2 = 0
+        while j2 < self.wins.len() [
+            if self.wins[j2].tip_cand != "" and self.wins[j2].tip == "" and now2 - self.wins[j2].tip_ms >= 450 [
+                self.wins[j2].tip = self.wins[j2].tip_cand.clone()
+                self.wins[j2].dirty = true
+            ]
+            j2 = j2 + 1
+        ]
+        if self.tick_ms > 0 and now2 - self.last_tick >= self.tick_ms [
+            self.last_tick = now2
+            out.push(self.mk_msg("tick", 0))
+        ]
+        if out.len() > 0 [
+            self.force = true
+        ]
+        end out
+    ]
+
+    pub fun frame1(self, ui: Element) -> List<Message> [
+        let l: List<Element> = [ui]
+        end self.frame(l)
+    ]
+
+    pub fun reset_caret(self) [
+        self.caret_ms = gui_now_ms()
+        self.caret_on = true
+    ]
+
+    pub fun mk_msg(self, id: Str, win: Int) -> Message [
+        let m = message(id)
+        m.win = win
+        end m
+    ]
+
+    !! zwraca 0 lub 1 komunikat (kompilator nie propaguje &mut przez wywolania metod, wiec bez parametru `out`)
+    pub fun activate(self, wi: Int, b: Box) -> List<Message> [
+        let res: List<Message> = []
+        let e = b.el.clone()
+        let win = self.wins[wi].id
+        if e.msg != "" [
+            let m = self.mk_msg(e.msg.clone(), win)
+            m.text = e.text.clone()
+            if e.kind == "checkbox" or e.kind == "toggler" [
+                m.flag = not e.on
+            ]
+            if e.kind == "radio" [
+                m.flag = true
+            ]
+            res.push(m)
+        ]
+        end res
+    ]
+
+    !! obejscie dla funkcji pomocniczych przyjmujacych `app`: kompilator uznaje parametr za mutowany dopiero po
+    !! wywolaniu metody o nazwie jak wbudowane mutatory (clear/insert/push...) - wywolaj `app.clear()` w takiej funkcji
+    pub fun clear(self) [
+        self.force = true
+    ]
+
+    pub fun slider_value(self, b: Box, x: Float) -> Float [
+        let e = b.el.clone()
+        let kr = 8.0
+        let ratio = fclamp((x - (b.x + kr)) / fmax(1.0, b.w - 2.0 * kr), 0.0, 1.0)
+        let v = e.vmin + ratio * (e.vmax - e.vmin)
+        if e.step > 0.0 [
+            v = fround(v / e.step) * e.step
+            v = fclamp(v, e.vmin, e.vmax)
+        ]
+        end v
+    ]
+
+    pub fun update_hover(self, wi: Int) [
+        if not self.wins[wi].has_last [
+            end
+        ]
+        let w = self.wins[wi].clone()
+        let h = hit_test(w.last.clone(), w.mx, w.my)
+        if w.open_pick != "" [
+            match find_box(w.last.clone(), w.open_pick.clone()) [
+                Some(pb) -> [
+                    let rh = pick_row_h()
+                    let lw = pick_list_w(pb.clone())
+                    let n = pb.el.opts.len()
+                    let lh = rh * (n as Float) + 8.0
+                    let ly = pb.y + pb.h + 4.0
+                    if ly + lh > w.h - 4.0 [
+                        ly = pb.y - lh - 4.0
+                    ]
+                    let row = -1
+                    if w.mx >= pb.x and w.mx < pb.x + lw and w.my >= ly + 4.0 and w.my < ly + 4.0 + rh * (n as Float) [
+                        row = ((w.my - ly - 4.0) / rh) as Int
+                    ]
+                    if row != w.pick_hover [
+                        self.wins[wi].pick_hover = row
+                        self.wins[wi].dirty = true
+                    ]
+                    if row >= 0 [
+                        h = Hit("", "", -1)
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        if h.id != w.hover or h.sub != w.sub [
+            self.wins[wi].hover = h.id.clone()
+            self.wins[wi].hover_kind = h.kind.clone()
+            self.wins[wi].sub = h.sub
+            self.wins[wi].dirty = true
+            let cur = "default"
+            if h.kind == "text_input" [
+                cur = "text"
+            ]
+            if h.kind == "button" or h.kind == "checkbox" or h.kind == "toggler" or h.kind == "radio" or h.kind == "pick_list" or h.kind == "tabs" or h.kind == "slider" [
+                cur = "pointer"
+            ]
+            if h.kind == "container" or h.kind == "row" or h.kind == "column" or h.kind == "stack" or h.kind == "text" or h.kind == "icon" [
+                cur = "pointer"
+            ]
+            if cur != w.cursor [
+                self.wins[wi].cursor = cur.clone()
+                gui_cursor(cur)
+            ]
+        ]
+        let tip = hit_tip(w.last.clone(), w.mx, w.my)
+        if tip != w.tip_cand [
+            self.wins[wi].tip_cand = tip.clone()
+            self.wins[wi].tip_ms = gui_now_ms()
+            if w.tip != "" [
+                self.wins[wi].tip = ""
+                self.wins[wi].dirty = true
+            ]
+        ]
+    ]
+
+    pub fun handle_event(self, line: Str, out: List<Message>) [
+        if gui_env("GUI_DEBUG") != "" [
+            log("gui-event", line)
+        ]
+        let p = s_split(line, "\t")
+        let kind = p[0].clone()
+        let wid = -1
+        if p.len() > 1 [
+            wid = parse_i(p[1].clone())
+        ]
+        if kind == "output" or kind == "toplevel" or kind == "toplevel_closed" or kind == "lock" or kind == "idle" or kind == "clip_changed" [
+            let m = self.mk_msg(kind.clone(), 0)
+            m.args = p.clone()
+            if kind == "toplevel" and p.len() >= 5 [
+                m.idx = parse_i(p[1].clone())
+                m.text = p[2].clone()
+                m.text2 = p[3].clone()
+                m.text3 = p[4].clone()
+            ]
+            if kind == "toplevel_closed" and p.len() >= 2 [
+                m.idx = parse_i(p[1].clone())
+            ]
+            if kind == "output" and p.len() >= 7 [
+                m.text = p[1].clone()
+                m.args = p.clone()
+            ]
+            if kind == "lock" and p.len() >= 2 [
+                m.text = p[1].clone()
+            ]
+            if kind == "idle" and p.len() >= 3 [
+                m.idx = parse_i(p[1].clone())
+                m.flag = p[2] == "1"
+            ]
+            out.push(m)
+            end
+        ]
+        let wi = self.win_index(wid)
+        if wi < 0 [
+            end
+        ]
+        if kind == "resize" and p.len() >= 5 [
+            let nw = parse_f(p[2].clone())
+            let nh = parse_f(p[3].clone())
+            let ns = parse_f(p[4].clone())
+            let changed = nw != self.wins[wi].w or nh != self.wins[wi].h or ns != self.wins[wi].scale
+            self.wins[wi].w = nw
+            self.wins[wi].h = nh
+            self.wins[wi].scale = ns
+            self.wins[wi].dirty = true
+            if changed [
+                let m = self.mk_msg("resize", wid)
+                m.num = nw
+                m.args = ["", p[2].clone(), p[3].clone()]
+                out.push(m)
+            ]
+        ]
+        if kind == "ready" [
+            self.wins[wi].ready = true
+            self.wins[wi].dirty = true
+        ]
+        if kind == "expose" [
+            self.wins[wi].dirty = true
+        ]
+        if kind == "close" [
+            self.wins[wi].closed = true
+            let m = self.mk_msg("close", wid)
+            out.push(m)
+            if wid == self.main [
+                self.run = false
+            ]
+        ]
+        if kind == "focus" and p.len() >= 3 [
+            if p[2] == "0" [
+                self.wins[wi].pressed = ""
+                self.wins[wi].drag = ""
+            ]
+            self.wins[wi].dirty = true
+        ]
+        if kind == "ptr_leave" [
+            self.wins[wi].hover = ""
+            self.wins[wi].hover_kind = ""
+            self.wins[wi].sub = -1
+            self.wins[wi].tip_cand = ""
+            self.wins[wi].tip = ""
+            self.wins[wi].dirty = true
+        ]
+        if (kind == "ptr_move" or kind == "touch_move") and p.len() >= 4 [
+            let xi = 2
+            if kind == "touch_move" [
+                xi = 3
+            ]
+            self.wins[wi].mx = parse_f(p[xi].clone())
+            self.wins[wi].my = parse_f(p[xi + 1].clone())
+            self.pointer_move(wi, out)
+        ]
+        if (kind == "ptr_down" or kind == "touch_down") and p.len() >= 5 [
+            let bi = 0
+            let xi = 3
+            if kind == "touch_down" [
+                xi = 3
+            ] else [
+                bi = parse_i(p[2].clone())
+            ]
+            self.wins[wi].mx = parse_f(p[xi].clone())
+            self.wins[wi].my = parse_f(p[xi + 1].clone())
+            self.update_hover(wi)
+            if bi == 0 [
+                self.pointer_down(wi, out)
+            ]
+        ]
+        if (kind == "ptr_up" or kind == "touch_up") and p.len() >= 4 [
+            self.pointer_up(wi, out)
+        ]
+        if kind == "scroll" and p.len() >= 6 [
+            let dy = parse_f(p[3].clone())
+            let mx = parse_f(p[4].clone())
+            let my = parse_f(p[5].clone())
+            self.wins[wi].mx = mx
+            self.wins[wi].my = my
+            if self.wins[wi].has_last [
+                let sid = hit_scroll(self.wins[wi].last.clone(), mx, my)
+                if sid != "" [
+                    let cur = 0.0
+                    match self.wins[wi].scroll.fetch(sid.clone()) [
+                        Some(v) -> [
+                            cur = v
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    self.wins[wi].scroll.insert(sid, cur + dy * 2.0)
+                    self.wins[wi].dirty = true
+                ]
+            ]
+        ]
+        if kind == "key" and p.len() >= 7 [
+            self.key_event(wi, p, out)
+        ]
+    ]
+
+    pub fun pointer_move(self, wi: Int, out: List<Message>) [
+        let w = self.wins[wi].clone()
+        if w.drag != "" and w.has_last [
+            if s_starts(w.drag.clone(), "sel:") [
+                let id = s_sub(w.drag.clone(), 4, slen(w.drag.clone()))
+                match find_box(w.last.clone(), id.clone()) [
+                    Some(b) -> [
+                        let t = self.edit_text(wi, b.el.clone())
+                        let c = caret_from_x(b.el.clone(), t.clone(), b.x, w.mx)
+                        self.wins[wi].caret.insert(id, c)
+                        self.wins[wi].dirty = true
+                    ]
+                    None -> [
+                    ]
+                ]
+            ] else [
+                match find_box(w.last.clone(), w.drag.clone()) [
+                    Some(b) -> [
+                        if b.el.kind == "slider" [
+                            let v = self.slider_value(b.clone(), w.mx)
+                            let m = self.mk_msg(b.el.msg.clone(), w.id)
+                            m.num = v
+                            if b.el.msg != "" and fabs(v - b.el.v) > 0.00001 [
+                                out.push(m)
+                            ]
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        self.update_hover(wi)
+    ]
+
+    pub fun edit_text(self, wi: Int, e: Element) -> Str [
+        match self.wins[wi].edit.fetch(e.id.clone()) [
+            Some(t) -> [
+                end t
+            ]
+            None -> [
+            ]
+        ]
+        end e.text.clone()
+    ]
+
+    pub fun pointer_down(self, wi: Int, out: List<Message>) [
+        let w = self.wins[wi].clone()
+        if not w.has_last [
+            end
+        ]
+        self.reset_caret()
+        if w.open_pick != "" [
+            match find_box(w.last.clone(), w.open_pick.clone()) [
+                Some(pb) -> [
+                    if w.pick_hover >= 0 and w.pick_hover < pb.el.opts.len() [
+                        let m = self.mk_msg(pb.el.msg.clone(), w.id)
+                        m.text = pb.el.opts[w.pick_hover].clone()
+                        m.idx = w.pick_hover
+                        if pb.el.msg != "" [
+                            out.push(m)
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            self.wins[wi].open_pick = ""
+            self.wins[wi].dirty = true
+            end
+        ]
+        let h = hit_test(w.last.clone(), w.mx, w.my)
+        self.wins[wi].pressed = h.id.clone()
+        self.wins[wi].dirty = true
+        if h.id == "" [
+            self.wins[wi].focus = ""
+            end
+        ]
+        match find_box(w.last.clone(), h.id.clone()) [
+            Some(b) -> [
+                let k = b.el.kind.clone()
+                if k == "text_input" [
+                    self.wins[wi].focus = h.id.clone()
+                    let t = self.edit_text(wi, b.el.clone())
+                    let c = caret_from_x(b.el.clone(), t.clone(), b.x, w.mx)
+                    self.wins[wi].caret.insert(h.id.clone(), c)
+                    self.wins[wi].sel.insert(h.id.clone(), c)
+                    self.wins[wi].drag = "sel:" + h.id
+                ]
+                if k == "slider" [
+                    self.wins[wi].focus = h.id.clone()
+                    self.wins[wi].drag = h.id.clone()
+                    let v = self.slider_value(b.clone(), w.mx)
+                    if b.el.msg != "" [
+                        let m = self.mk_msg(b.el.msg.clone(), w.id)
+                        m.num = v
+                        out.push(m)
+                    ]
+                ]
+                if k == "pick_list" [
+                    self.wins[wi].focus = h.id.clone()
+                    self.wins[wi].open_pick = h.id.clone()
+                    self.wins[wi].pick_hover = -1
+                ]
+                if k == "tabs" and h.sub >= 0 [
+                    if b.el.msg != "" [
+                        let m = self.mk_msg(b.el.msg.clone(), w.id)
+                        m.idx = h.sub
+                        m.text = b.el.opts[h.sub].clone()
+                        out.push(m)
+                    ]
+                ]
+                if k == "checkbox" or k == "toggler" or k == "radio" [
+                    self.wins[wi].focus = ""
+                ]
+                if k == "button" [
+                    self.wins[wi].focus = ""
+                ]
+            ]
+            None -> [
+            ]
+        ]
+    ]
+
+    pub fun pointer_up(self, wi: Int, out: List<Message>) [
+        let w = self.wins[wi].clone()
+        let pressed = w.pressed.clone()
+        self.wins[wi].pressed = ""
+        self.wins[wi].drag = ""
+        self.wins[wi].dirty = true
+        if pressed == "" or not w.has_last [
+            end
+        ]
+        let h = hit_test(w.last.clone(), w.mx, w.my)
+        if h.id == pressed [
+            match find_box(w.last.clone(), pressed.clone()) [
+                Some(b) -> [
+                    let k = b.el.kind.clone()
+                    if k == "button" or k == "checkbox" or k == "toggler" or k == "radio" or k == "container" or k == "row" or k == "column" or k == "stack" or k == "text" or k == "icon" [
+                        for am in self.activate(wi, b.clone()) [
+                            out.push(am)
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+    ]
+
+    pub fun key_event(self, wi: Int, p: List<Str>, out: List<Message>) [
+        let down = p[2] == "1"
+        let name = p[4].clone()
+        let text = p[5].clone()
+        text = s_replace(s_replace(text.clone(), "\\t", "\t"), "\\n", "\n")
+        let mods = parse_i(p[6].clone())
+        self.mods = mods
+        if not down [
+            end
+        ]
+        self.reset_caret()
+        let w = self.wins[wi].clone()
+        if not w.has_last [
+            end
+        ]
+        let ctrl = (mods / 2) % 2 == 1
+        let shift = mods % 2 == 1
+        if name == "Escape" [
+            if w.open_pick != "" [
+                self.wins[wi].open_pick = ""
+            ] else [
+                self.wins[wi].focus = ""
+            ]
+            self.wins[wi].dirty = true
+            end
+        ]
+        if name == "Tab" [
+            let ids: List<Str> = []
+            collect_focusable(w.last.clone(), ids)
+            if ids.len() > 0 [
+                let cur = -1
+                let i = 0
+                while i < ids.len() [
+                    if ids[i] == w.focus [
+                        cur = i
+                    ]
+                    i = i + 1
+                ]
+                let nx = 0
+                if shift [
+                    nx = cur - 1
+                    if nx < 0 [
+                        nx = ids.len() - 1
+                    ]
+                ] else [
+                    nx = cur + 1
+                    if nx >= ids.len() [
+                        nx = 0
+                    ]
+                ]
+                self.wins[wi].focus = ids[nx].clone()
+                self.wins[wi].open_pick = ""
+                self.wins[wi].dirty = true
+            ]
+            end
+        ]
+        if w.focus == "" [
+            let m = self.mk_msg("key", w.id)
+            m.text = name
+            m.text2 = text
+            m.idx = mods
+            out.push(m)
+            end
+        ]
+        match find_box(w.last.clone(), w.focus.clone()) [
+            Some(b) -> [
+                let e = b.el.clone()
+                if e.kind == "text_input" [
+                    self.edit_key(wi, b.clone(), name.clone(), text.clone(), mods, out)
+                ]
+                if e.kind == "button" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" [
+                    if name == "Enter" or name == "Space" [
+                        for am in self.activate(wi, b.clone()) [
+                            out.push(am)
+                        ]
+                    ]
+                ]
+                if e.kind == "slider" [
+                    let stp = e.step
+                    if stp <= 0.0 [
+                        stp = (e.vmax - e.vmin) / 20.0
+                    ]
+                    let nv = e.v
+                    if name == "ArrowLeft" or name == "ArrowDown" [
+                        nv = fmax(e.vmin, e.v - stp)
+                    ]
+                    if name == "ArrowRight" or name == "ArrowUp" [
+                        nv = fmin(e.vmax, e.v + stp)
+                    ]
+                    if name == "Home" [
+                        nv = e.vmin
+                    ]
+                    if name == "End" [
+                        nv = e.vmax
+                    ]
+                    if nv != e.v and e.msg != "" [
+                        let m = self.mk_msg(e.msg.clone(), w.id)
+                        m.num = nv
+                        out.push(m)
+                    ]
+                ]
+                if e.kind == "pick_list" [
+                    let n = e.opts.len()
+                    if name == "Enter" or name == "Space" [
+                        if w.open_pick == e.id [
+                            if w.pick_hover >= 0 and w.pick_hover < n and e.msg != "" [
+                                let m = self.mk_msg(e.msg.clone(), w.id)
+                                m.text = e.opts[w.pick_hover].clone()
+                                m.idx = w.pick_hover
+                                out.push(m)
+                            ]
+                            self.wins[wi].open_pick = ""
+                        ] else [
+                            self.wins[wi].open_pick = e.id.clone()
+                            self.wins[wi].pick_hover = 0
+                        ]
+                    ]
+                    if name == "ArrowDown" or name == "ArrowUp" [
+                        if w.open_pick == e.id [
+                            let nh = w.pick_hover
+                            if name == "ArrowDown" [
+                                nh = imin(n - 1, nh + 1)
+                            ] else [
+                                nh = imax(0, nh - 1)
+                            ]
+                            self.wins[wi].pick_hover = nh
+                        ]
+                    ]
+                ]
+                self.wins[wi].dirty = true
+            ]
+            None -> [
+            ]
+        ]
+    ]
+
+    pub fun edit_key(self, wi: Int, b: Box, name: Str, text: Str, mods: Int, out: List<Message>) [
+        let e = b.el.clone()
+        let w = self.wins[wi].clone()
+        let cur = self.edit_text(wi, e.clone())
+        let n = slen(cur.clone())
+        let caret = n
+        match self.wins[wi].caret.fetch(e.id.clone()) [
+            Some(v) -> [
+                caret = v
+            ]
+            None -> [
+            ]
+        ]
+        let anchor = caret
+        match self.wins[wi].sel.fetch(e.id.clone()) [
+            Some(v) -> [
+                anchor = v
+            ]
+            None -> [
+            ]
+        ]
+        let ctrl = (mods / 2) % 2 == 1
+        let ins = text
+        let nm = name
+        if ctrl [
+            ins = ""
+            if name == "a" or name == "A" [
+                caret = n
+                anchor = 0
+                nm = ""
+            ]
+            if name == "c" or name == "C" or name == "x" or name == "X" [
+                if caret != anchor [
+                    let lo = imin(caret, anchor)
+                    let hi = imax(caret, anchor)
+                    gui_clip_set(s_sub(cur.clone(), lo, hi))
+                ]
+                if name == "x" or name == "X" [
+                    nm = "Delete"
+                ] else [
+                    nm = ""
+                ]
+            ]
+            if name == "v" or name == "V" [
+                let clip = gui_clip_get()
+                ins = s_replace(s_replace(clip.clone(), "\n", " "), "\r", "")
+                nm = ""
+            ]
+        ]
+        if name == "Tab" [
+            ins = ""
+        ]
+        if name == "Enter" [
+            ins = ""
+        ]
+        let r = edit_apply(cur.clone(), caret, anchor, nm, ins, mods)
+        self.wins[wi].caret.insert(e.id.clone(), r.caret)
+        self.wins[wi].sel.insert(e.id.clone(), r.anchor)
+        if r.changed [
+            self.wins[wi].edit.insert(e.id.clone(), r.text.clone())
+            if e.msg != "" [
+                let m = self.mk_msg(e.msg.clone(), w.id)
+                m.text = r.text.clone()
+                m.idx = r.caret
+                out.push(m)
+            ]
+        ]
+        if r.submit and e.msg2 != "" [
+            let m = self.mk_msg(e.msg2.clone(), w.id)
+            m.text = r.text.clone()
+            out.push(m)
+        ]
+        self.wins[wi].dirty = true
+    ]
+]
