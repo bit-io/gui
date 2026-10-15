@@ -1,0 +1,91 @@
+get <bit:gui::color>
+
+struct Palette [
+    bg: Int,
+    surface: Int,
+    surface2: Int,
+    surface3: Int,
+    overlay: Int,
+    text: Int,
+    subtext: Int,
+    muted: Int,
+    primary: Int,
+    primary_text: Int,
+    success: Int,
+    warning: Int,
+    danger: Int,
+    info: Int,
+    border: Int,
+    shadow: Int
+]
+
+struct Theme [
+    name: Str,
+    p: Palette,
+    dark: Bool,
+    glass: Bool,
+    radius: Float,
+    radius_lg: Float,
+    font: Float,
+    font_sm: Float,
+    font_lg: Float,
+    font_title: Float,
+    spacing: Float,
+    anim_ms: Float
+]
+
+fun make_theme(name: Str, p: Palette, dark: Bool, glass: Bool) -> Theme [
+    end Theme(name, p, dark, glass, 8.0, 14.0, 14.0, 12.0, 17.0, 26.0, 8.0, 140.0)
+]
+
+!! Catppuccin Mocha (domyslny, ciemny)
+fun theme_dark() -> Theme [
+    let p = Palette(parse_color("#1e1e2e"), parse_color("#24273a"), parse_color("#313244"), parse_color("#45475a"), parse_color("#181825"), parse_color("#cdd6f4"), parse_color("#a6adc8"), parse_color("#6c7086"), parse_color("#89b4fa"), parse_color("#11111b"), parse_color("#a6e3a1"), parse_color("#f9e2af"), parse_color("#f38ba8"), parse_color("#74c7ec"), rgba(255, 255, 255, 26), rgba(0, 0, 0, 110))
+    end make_theme("dark", p, true, false)
+]
+
+!! Catppuccin Latte (jasny)
+fun theme_light() -> Theme [
+    let p = Palette(parse_color("#eff1f5"), parse_color("#ffffff"), parse_color("#e6e9ef"), parse_color("#ccd0da"), parse_color("#dce0e8"), parse_color("#4c4f69"), parse_color("#6c6f85"), parse_color("#9ca0b0"), parse_color("#1e66f5"), parse_color("#ffffff"), parse_color("#40a02b"), parse_color("#df8e1d"), parse_color("#d20f39"), parse_color("#04a5e5"), rgba(0, 0, 0, 28), rgba(30, 40, 80, 60))
+    end make_theme("light", p, false, false)
+]
+
+fun theme_nord() -> Theme [
+    let p = Palette(parse_color("#2e3440"), parse_color("#3b4252"), parse_color("#434c5e"), parse_color("#4c566a"), parse_color("#272c36"), parse_color("#eceff4"), parse_color("#d8dee9"), parse_color("#7b88a1"), parse_color("#88c0d0"), parse_color("#2e3440"), parse_color("#a3be8c"), parse_color("#ebcb8b"), parse_color("#bf616a"), parse_color("#81a1c1"), rgba(255, 255, 255, 24), rgba(0, 0, 0, 110))
+    end make_theme("nord", p, true, false)
+]
+
+fun theme_dracula() -> Theme [
+    let p = Palette(parse_color("#282a36"), parse_color("#2f3144"), parse_color("#44475a"), parse_color("#565a73"), parse_color("#21222c"), parse_color("#f8f8f2"), parse_color("#c5c8d4"), parse_color("#6272a4"), parse_color("#bd93f9"), parse_color("#282a36"), parse_color("#50fa7b"), parse_color("#f1fa8c"), parse_color("#ff5555"), parse_color("#8be9fd"), rgba(255, 255, 255, 24), rgba(0, 0, 0, 120))
+    end make_theme("dracula", p, true, false)
+]
+
+fun theme_tokyo() -> Theme [
+    let p = Palette(parse_color("#1a1b26"), parse_color("#1f2335"), parse_color("#292e42"), parse_color("#3b4261"), parse_color("#16161e"), parse_color("#c0caf5"), parse_color("#a9b1d6"), parse_color("#565f89"), parse_color("#7aa2f7"), parse_color("#16161e"), parse_color("#9ece6a"), parse_color("#e0af68"), parse_color("#f7768e"), parse_color("#7dcfff"), rgba(255, 255, 255, 22), rgba(0, 0, 0, 120))
+    end make_theme("tokyo", p, true, false)
+]
+
+!! Szklany: polprzezroczyste powierzchnie + rozmycie tla (paski, doki, launchery)
+fun theme_glass() -> Theme [
+    let p = Palette(rgba(24, 24, 37, 150), rgba(30, 30, 46, 140), rgba(255, 255, 255, 22), rgba(255, 255, 255, 40), rgba(17, 17, 27, 190), rgba(236, 240, 255, 255), rgba(200, 206, 230, 230), rgba(170, 176, 205, 170), parse_color("#89b4fa"), parse_color("#11111b"), parse_color("#a6e3a1"), parse_color("#f9e2af"), parse_color("#f38ba8"), parse_color("#74c7ec"), rgba(255, 255, 255, 38), rgba(0, 0, 0, 90))
+    end make_theme("glass", p, true, true)
+]
+
+fun theme_by_name(n: Str) -> Theme [
+    if n == "light" [
+        end theme_light()
+    ]
+    if n == "nord" [
+        end theme_nord()
+    ]
+    if n == "dracula" [
+        end theme_dracula()
+    ]
+    if n == "tokyo" [
+        end theme_tokyo()
+    ]
+    if n == "glass" [
+        end theme_glass()
+    ]
+    end theme_dark()
+]
