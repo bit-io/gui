@@ -1,0 +1,3938 @@
+get <crates:tiny-skia::0.11>
+get <crates:ttf-parser::0.25>
+get <crates:wayland-client::0.31>
+get <crates:wayland-protocols::0.32+client+staging+unstable>
+get <crates:wayland-protocols-wlr::0.3+client>
+get <crates:rustix::0.38+fs+mm+event+shm+pipe+process>
+get <crates:xkbcommon-dl::0.4>
+get <crates:x11rb::0.13>
+
+native {Rust} [
+pub mod paint {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use tiny_skia::{
+        BlendMode, Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType,
+        Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point, RadialGradient, Rect,
+        SpreadMode, Stroke, Transform,
+    };
+
+    pub const OP_RRECT: i64 = 1;
+    pub const OP_STROKE: i64 = 2;
+    pub const OP_LGRAD: i64 = 3;
+    pub const OP_RGRAD: i64 = 4;
+    pub const OP_SHADOW: i64 = 5;
+    pub const OP_TEXT: i64 = 6;
+    pub const OP_CLIP: i64 = 7;
+    pub const OP_UNCLIP: i64 = 8;
+    pub const OP_ICON: i64 = 9;
+    pub const OP_BACKDROP: i64 = 10;
+    pub const OP_LAYER: i64 = 11;
+    pub const OP_ENDLAYER: i64 = 12;
+    pub const OP_LINE: i64 = 13;
+    pub const OP_PATH: i64 = 14;
+    pub const OP_CLEAR: i64 = 15;
+
+    pub fn b64_decode(s: &str) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(s.len() * 3 / 4);
+        let mut acc: u32 = 0;
+        let mut bits: u32 = 0;
+        for ch in s.bytes() {
+            let v: u32 = match ch {
+                b'A'..=b'Z' => (ch - b'A') as u32,
+                b'a'..=b'z' => (ch - b'a') as u32 + 26,
+                b'0'..=b'9' => (ch - b'0') as u32 + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => continue,
+            };
+            acc = (acc << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push(((acc >> bits) & 0xff) as u8);
+            }
+        }
+        out
+    }
+
+    pub struct Face {
+        pub face: ttf_parser::Face<'static>,
+        pub upem: f32,
+        pub ascent: f32,
+        pub descent: f32,
+        pub cmap_cache: HashMap<char, u16>,
+    }
+
+    pub struct Glyph {
+        pub w: u32,
+        pub h: u32,
+        pub left: i32,
+        pub top: i32,
+        pub data: Vec<u8>,
+    }
+
+    pub struct Fonts {
+        pub faces: Vec<Face>,
+        pub glyphs: HashMap<(u8, u16, u32, u8), Rc<Glyph>>,
+        pub icons: HashMap<String, Rc<Vec<Path>>>,
+        pub icon_src: HashMap<String, String>,
+    }
+
+    thread_local! {
+        pub static FONTS: RefCell<Fonts> = RefCell::new(Fonts { faces: Vec::new(), glyphs: HashMap::new(), icons: HashMap::new(), icon_src: HashMap::new() });
+    }
+
+    pub fn add_face(bytes: Vec<u8>) -> i64 {
+        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        match ttf_parser::Face::parse(leaked, 0) {
+            Ok(f) => {
+                let upem = f.units_per_em() as f32;
+                let asc = f.ascender() as f32 / upem;
+                let desc = f.descender() as f32 / upem;
+                FONTS.with(|fo| {
+                    let mut fo = fo.borrow_mut();
+                    fo.faces.push(Face { face: f, upem, ascent: asc, descent: desc, cmap_cache: HashMap::new() });
+                    (fo.faces.len() as i64) - 1
+                })
+            }
+            Err(_) => -1,
+        }
+    }
+
+    pub fn add_icons(table: &str) {
+        FONTS.with(|fo| {
+            let mut fo = fo.borrow_mut();
+            for line in table.lines() {
+                if let Some(p) = line.find('|') {
+                    fo.icon_src.insert(line[..p].trim().to_string(), line[p + 1..].trim().to_string());
+                }
+            }
+        });
+    }
+
+    fn glyph_id(f: &mut Face, c: char) -> u16 {
+        if let Some(g) = f.cmap_cache.get(&c) {
+            return *g;
+        }
+        let g = f.face.glyph_index(c).map(|g| g.0).unwrap_or(0);
+        f.cmap_cache.insert(c, g);
+        g
+    }
+
+    fn face_for(fo: &mut Fonts, weight: i64, c: char) -> (usize, u16) {
+        let n = fo.faces.len();
+        if n == 0 {
+            return (0, 0);
+        }
+        let pref = if weight >= 1 && n > 1 { 1 } else { 0 };
+        let g = glyph_id(&mut fo.faces[pref], c);
+        if g != 0 || c == ' ' {
+            return (pref, g);
+        }
+        for i in 0..n {
+            if i == pref {
+                continue;
+            }
+            let g2 = glyph_id(&mut fo.faces[i], c);
+            if g2 != 0 {
+                return (i, g2);
+            }
+        }
+        (pref, 0)
+    }
+
+    fn kern_pair(f: &Face, a: u16, b: u16) -> f32 {
+        use ttf_parser::gpos::PairAdjustment;
+        use ttf_parser::GlyphId;
+        let gpos = match f.face.tables().gpos {
+            Some(g) => g,
+            None => return 0.0,
+        };
+        let ga = GlyphId(a);
+        let gb = GlyphId(b);
+        for li in 0..gpos.lookups.len() {
+            let lookup = match gpos.lookups.get(li) {
+                Some(l) => l,
+                None => continue,
+            };
+            for si in 0..lookup.subtables.len() {
+                let st = match lookup.subtables.get::<ttf_parser::gpos::PositioningSubtable>(si) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let ttf_parser::gpos::PositioningSubtable::Pair(p) = st {
+                    match p {
+                        PairAdjustment::Format1 { coverage, sets } => {
+                            if let Some(ci) = coverage.get(ga) {
+                                if let Some(set) = sets.get(ci) {
+                                    if let Some((v1, _v2)) = set.get(gb) {
+                                        if v1.x_advance != 0 {
+                                            return v1.x_advance as f32 / f.upem;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        PairAdjustment::Format2 { coverage, classes, matrix } => {
+                            if coverage.get(ga).is_some() {
+                                let c1 = classes.0.get(ga);
+                                let c2 = classes.1.get(gb);
+                                if let Some((v1, _v2)) = matrix.get((c1, c2)) {
+                                    if v1.x_advance != 0 {
+                                        return v1.x_advance as f32 / f.upem;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if li > 6 {
+                break;
+            }
+        }
+        0.0
+    }
+
+    pub fn measure_text(text: &str, size: f32, weight: i64, ls: f32) -> f32 {
+        FONTS.with(|fo| {
+            let mut fo = fo.borrow_mut();
+            let mut x = 0.0f32;
+            let mut prev: Option<(usize, u16)> = None;
+            for c in text.chars() {
+                let (fi, g) = face_for(&mut fo, weight, c);
+                if fo.faces.is_empty() {
+                    x += size * 0.55;
+                    continue;
+                }
+                let face = &fo.faces[fi];
+                if let Some((pf, pg)) = prev {
+                    if pf == fi {
+                        x += kern_pair(face, pg, g) * size;
+                    }
+                }
+                let adv = face.face.glyph_hor_advance(ttf_parser::GlyphId(g)).unwrap_or(0) as f32 / face.upem;
+                x += adv * size + ls;
+                prev = Some((fi, g));
+            }
+            x
+        })
+    }
+
+    pub fn font_metrics(size: f32, weight: i64) -> (f32, f32) {
+        FONTS.with(|fo| {
+            let fo = fo.borrow();
+            let i = if weight >= 1 && fo.faces.len() > 1 { 1 } else { 0 };
+            if fo.faces.is_empty() {
+                return (size * 0.95, size * 0.25);
+            }
+            (fo.faces[i].ascent * size, -fo.faces[i].descent * size)
+        })
+    }
+
+    pub fn wrap_text(text: &str, size: f32, weight: i64, max_w: f32, ls: f32) -> Vec<String> {
+        let max_w = if max_w > 0.0 { max_w + 1.0 } else { max_w };
+        let mut lines: Vec<String> = Vec::new();
+        for para in text.split('\n') {
+            if max_w <= 0.0 {
+                lines.push(para.to_string());
+                continue;
+            }
+            let mut cur = String::new();
+            let mut cur_w = 0.0f32;
+            let space_w = measure_text(" ", size, weight, ls);
+            for word in para.split(' ') {
+                let ww = measure_text(word, size, weight, ls);
+                if cur.is_empty() {
+                    if ww <= max_w {
+                        cur.push_str(word);
+                        cur_w = ww;
+                    } else {
+                        let mut piece = String::new();
+                        let mut pw = 0.0f32;
+                        for ch in word.chars() {
+                            let cw = measure_text(&ch.to_string(), size, weight, ls);
+                            if pw + cw > max_w && !piece.is_empty() {
+                                lines.push(piece.clone());
+                                piece.clear();
+                                pw = 0.0;
+                            }
+                            piece.push(ch);
+                            pw += cw;
+                        }
+                        cur = piece;
+                        cur_w = pw;
+                    }
+                } else if cur_w + space_w + ww <= max_w {
+                    cur.push(' ');
+                    cur.push_str(word);
+                    cur_w += space_w + ww;
+                } else {
+                    lines.push(cur.clone());
+                    cur.clear();
+                    if ww <= max_w {
+                        cur.push_str(word);
+                        cur_w = ww;
+                    } else {
+                        let mut piece = String::new();
+                        let mut pw = 0.0f32;
+                        for ch in word.chars() {
+                            let cw = measure_text(&ch.to_string(), size, weight, ls);
+                            if pw + cw > max_w && !piece.is_empty() {
+                                lines.push(piece.clone());
+                                piece.clear();
+                                pw = 0.0;
+                            }
+                            piece.push(ch);
+                            pw += cw;
+                        }
+                        cur = piece;
+                        cur_w = pw;
+                    }
+                }
+            }
+            lines.push(cur);
+        }
+        lines
+    }
+
+    struct OutlineSink {
+        pb: PathBuilder,
+        s: f32,
+        ox: f32,
+        oy: f32,
+    }
+    impl ttf_parser::OutlineBuilder for OutlineSink {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.pb.move_to(self.ox + x * self.s, self.oy - y * self.s);
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.pb.line_to(self.ox + x * self.s, self.oy - y * self.s);
+        }
+        fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+            self.pb.quad_to(self.ox + x1 * self.s, self.oy - y1 * self.s, self.ox + x * self.s, self.oy - y * self.s);
+        }
+        fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+            self.pb.cubic_to(
+                self.ox + x1 * self.s,
+                self.oy - y1 * self.s,
+                self.ox + x2 * self.s,
+                self.oy - y2 * self.s,
+                self.ox + x * self.s,
+                self.oy - y * self.s,
+            );
+        }
+        fn close(&mut self) {
+            self.pb.close();
+        }
+    }
+
+    fn raster_glyph(fo: &mut Fonts, fi: usize, gid: u16, size_px: f32, sub: u8) -> Option<Rc<Glyph>> {
+        let key = (fi as u8, gid, (size_px * 4.0) as u32, sub);
+        if let Some(g) = fo.glyphs.get(&key) {
+            return Some(g.clone());
+        }
+        let face = &fo.faces[fi];
+        let s = size_px / face.upem;
+        let bb = face.face.glyph_bounding_box(ttf_parser::GlyphId(gid));
+        let g = match bb {
+            Some(bb) => {
+                let fx = sub as f32 / 4.0;
+                let x0 = (bb.x_min as f32 * s + fx).floor() as i32 - 1;
+                let x1 = (bb.x_max as f32 * s + fx).ceil() as i32 + 1;
+                let y0 = (-(bb.y_max as f32) * s).floor() as i32 - 1;
+                let y1 = (-(bb.y_min as f32) * s).ceil() as i32 + 1;
+                let w = (x1 - x0).max(1) as u32;
+                let h = (y1 - y0).max(1) as u32;
+                let mut sink = OutlineSink { pb: PathBuilder::new(), s, ox: fx - x0 as f32, oy: -(y0 as f32) };
+                face.face.outline_glyph(ttf_parser::GlyphId(gid), &mut sink)?;
+                let path = sink.pb.finish()?;
+                let mut pm = Pixmap::new(w, h)?;
+                let mut paint = Paint::default();
+                paint.set_color_rgba8(255, 255, 255, 255);
+                paint.anti_alias = true;
+                pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                let data: Vec<u8> = pm.data().chunks(4).map(|p| p[3]).collect();
+                Glyph { w, h, left: x0, top: y0, data }
+            }
+            None => Glyph { w: 0, h: 0, left: 0, top: 0, data: Vec::new() },
+        };
+        let rc = Rc::new(g);
+        fo.glyphs.insert(key, rc.clone());
+        Some(rc)
+    }
+
+    #[inline]
+    pub fn col(c: f64) -> Color {
+        let c = c as u32;
+        Color::from_rgba8(((c >> 8) & 255) as u8, ((c >> 16) & 255) as u8, ((c >> 24) & 255) as u8, (c & 255) as u8)
+    }
+
+    fn rrect_path(x: f32, y: f32, w: f32, h: f32, r: [f32; 4]) -> Option<Path> {
+        let maxr = (w.min(h)) / 2.0;
+        let r = [r[0].min(maxr).max(0.0), r[1].min(maxr).max(0.0), r[2].min(maxr).max(0.0), r[3].min(maxr).max(0.0)];
+        let k = 0.5522847498f32;
+        let mut pb = PathBuilder::new();
+        pb.move_to(x + r[0], y);
+        pb.line_to(x + w - r[1], y);
+        if r[1] > 0.0 {
+            pb.cubic_to(x + w - r[1] + r[1] * k, y, x + w, y + r[1] - r[1] * k, x + w, y + r[1]);
+        }
+        pb.line_to(x + w, y + h - r[2]);
+        if r[2] > 0.0 {
+            pb.cubic_to(x + w, y + h - r[2] + r[2] * k, x + w - r[2] + r[2] * k, y + h, x + w - r[2], y + h);
+        }
+        pb.line_to(x + r[3], y + h);
+        if r[3] > 0.0 {
+            pb.cubic_to(x + r[3] - r[3] * k, y + h, x, y + h - r[3] + r[3] * k, x, y + h - r[3]);
+        }
+        pb.line_to(x, y + r[0]);
+        if r[0] > 0.0 {
+            pb.cubic_to(x, y + r[0] - r[0] * k, x + r[0] - r[0] * k, y, x + r[0], y);
+        }
+        pb.close();
+        pb.finish()
+    }
+
+    fn parse_svg_path(d: &str) -> Option<Path> {
+        let b: Vec<char> = d.chars().collect();
+        let mut i = 0usize;
+        let mut pb = PathBuilder::new();
+        let (mut cx, mut cy) = (0.0f32, 0.0f32);
+        let (mut sx, mut sy) = (0.0f32, 0.0f32);
+        let (mut lcx, mut lcy) = (0.0f32, 0.0f32); // ostatni punkt kontrolny
+        let mut cmd = 'M';
+        let mut prev_cmd = 'M';
+        let mut started = false;
+
+        fn skip(b: &Vec<char>, i: &mut usize) {
+            while *i < b.len() && (b[*i] == ' ' || b[*i] == ',' || b[*i] == '\n' || b[*i] == '\t') {
+                *i += 1;
+            }
+        }
+        fn num(b: &Vec<char>, i: &mut usize) -> Option<f32> {
+            skip(b, i);
+            let st = *i;
+            if *i < b.len() && (b[*i] == '-' || b[*i] == '+') {
+                *i += 1;
+            }
+            let mut dot = false;
+            while *i < b.len() {
+                let c = b[*i];
+                if c.is_ascii_digit() {
+                    *i += 1;
+                } else if c == '.' && !dot {
+                    dot = true;
+                    *i += 1;
+                } else if (c == 'e' || c == 'E') && *i > st {
+                    *i += 1;
+                    if *i < b.len() && (b[*i] == '-' || b[*i] == '+') {
+                        *i += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if *i == st {
+                return None;
+            }
+            b[st..*i].iter().collect::<String>().parse::<f32>().ok()
+        }
+        fn flag(b: &Vec<char>, i: &mut usize) -> Option<bool> {
+            skip(b, i);
+            if *i < b.len() && (b[*i] == '0' || b[*i] == '1') {
+                let v = b[*i] == '1';
+                *i += 1;
+                Some(v)
+            } else {
+                None
+            }
+        }
+
+        loop {
+            skip(&b, &mut i);
+            if i >= b.len() {
+                break;
+            }
+            let c = b[i];
+            if c.is_ascii_alphabetic() {
+                cmd = c;
+                i += 1;
+                if cmd == 'z' || cmd == 'Z' {
+                    pb.close();
+                    cx = sx;
+                    cy = sy;
+                    prev_cmd = 'Z';
+                    continue;
+                }
+            } else if cmd == 'M' {
+                cmd = 'L';
+            } else if cmd == 'm' {
+                cmd = 'l';
+            }
+            let rel = cmd.is_ascii_lowercase();
+            let up = cmd.to_ascii_uppercase();
+            let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+            match up {
+                'M' => {
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    pb.move_to(x, y);
+                    cx = x;
+                    cy = y;
+                    sx = x;
+                    sy = y;
+                    started = true;
+                }
+                'L' => {
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    pb.line_to(x, y);
+                    cx = x;
+                    cy = y;
+                }
+                'H' => {
+                    let x = num(&b, &mut i)? + ox;
+                    pb.line_to(x, cy);
+                    cx = x;
+                }
+                'V' => {
+                    let y = num(&b, &mut i)? + oy;
+                    pb.line_to(cx, y);
+                    cy = y;
+                }
+                'C' => {
+                    let x1 = num(&b, &mut i)? + ox;
+                    let y1 = num(&b, &mut i)? + oy;
+                    let x2 = num(&b, &mut i)? + ox;
+                    let y2 = num(&b, &mut i)? + oy;
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    pb.cubic_to(x1, y1, x2, y2, x, y);
+                    lcx = x2;
+                    lcy = y2;
+                    cx = x;
+                    cy = y;
+                }
+                'S' => {
+                    let x2 = num(&b, &mut i)? + ox;
+                    let y2 = num(&b, &mut i)? + oy;
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    let (x1, y1) = if prev_cmd == 'C' || prev_cmd == 'S' { (2.0 * cx - lcx, 2.0 * cy - lcy) } else { (cx, cy) };
+                    pb.cubic_to(x1, y1, x2, y2, x, y);
+                    lcx = x2;
+                    lcy = y2;
+                    cx = x;
+                    cy = y;
+                }
+                'Q' => {
+                    let x1 = num(&b, &mut i)? + ox;
+                    let y1 = num(&b, &mut i)? + oy;
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    pb.quad_to(x1, y1, x, y);
+                    lcx = x1;
+                    lcy = y1;
+                    cx = x;
+                    cy = y;
+                }
+                'T' => {
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    let (x1, y1) = if prev_cmd == 'Q' || prev_cmd == 'T' { (2.0 * cx - lcx, 2.0 * cy - lcy) } else { (cx, cy) };
+                    pb.quad_to(x1, y1, x, y);
+                    lcx = x1;
+                    lcy = y1;
+                    cx = x;
+                    cy = y;
+                }
+                'A' => {
+                    let rx = num(&b, &mut i)?;
+                    let ry = num(&b, &mut i)?;
+                    let rot = num(&b, &mut i)?;
+                    let large = flag(&b, &mut i)?;
+                    let sweep = flag(&b, &mut i)?;
+                    let x = num(&b, &mut i)? + ox;
+                    let y = num(&b, &mut i)? + oy;
+                    arc_to(&mut pb, cx, cy, rx, ry, rot, large, sweep, x, y);
+                    cx = x;
+                    cy = y;
+                }
+                _ => return None,
+            }
+            prev_cmd = up;
+        }
+        if !started {
+            return None;
+        }
+        pb.finish()
+    }
+
+    fn arc_to(pb: &mut PathBuilder, x1: f32, y1: f32, rx: f32, ry: f32, rot_deg: f32, large: bool, sweep: bool, x2: f32, y2: f32) {
+        if (x1 - x2).abs() < 1e-6 && (y1 - y2).abs() < 1e-6 {
+            return;
+        }
+        let mut rx = rx.abs();
+        let mut ry = ry.abs();
+        if rx < 1e-6 || ry < 1e-6 {
+            pb.line_to(x2, y2);
+            return;
+        }
+        let phi = rot_deg.to_radians();
+        let (sp, cp) = phi.sin_cos();
+        let dx = (x1 - x2) / 2.0;
+        let dy = (y1 - y2) / 2.0;
+        let x1p = cp * dx + sp * dy;
+        let y1p = -sp * dx + cp * dy;
+        let lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+        if lam > 1.0 {
+            let s = lam.sqrt();
+            rx *= s;
+            ry *= s;
+        }
+        let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+        let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+        let mut co = if den == 0.0 { 0.0 } else { (num / den).max(0.0).sqrt() };
+        if large == sweep {
+            co = -co;
+        }
+        let cxp = co * rx * y1p / ry;
+        let cyp = -co * ry * x1p / rx;
+        let cx = cp * cxp - sp * cyp + (x1 + x2) / 2.0;
+        let cy = sp * cxp + cp * cyp + (y1 + y2) / 2.0;
+        let ang = |ux: f32, uy: f32, vx: f32, vy: f32| -> f32 {
+            let dot = ux * vx + uy * vy;
+            let len = (ux * ux + uy * uy).sqrt() * (vx * vx + vy * vy).sqrt();
+            let mut a = (dot / len).clamp(-1.0, 1.0).acos();
+            if ux * vy - uy * vx < 0.0 {
+                a = -a;
+            }
+            a
+        };
+        let th1 = ang(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+        let mut dth = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+        if !sweep && dth > 0.0 {
+            dth -= std::f32::consts::TAU;
+        } else if sweep && dth < 0.0 {
+            dth += std::f32::consts::TAU;
+        }
+        let segs = (dth.abs() / (std::f32::consts::FRAC_PI_2)).ceil().max(1.0) as i32;
+        let delta = dth / segs as f32;
+        let t = 4.0 / 3.0 * (delta / 4.0).tan();
+        let mut a = th1;
+        for _ in 0..segs {
+            let (s1, c1) = a.sin_cos();
+            let (s2, c2) = (a + delta).sin_cos();
+            let p1x = c1 - t * s1;
+            let p1y = s1 + t * c1;
+            let p2x = c2 + t * s2;
+            let p2y = s2 - t * c2;
+            let map = |px: f32, py: f32| -> (f32, f32) {
+                let xx = px * rx;
+                let yy = py * ry;
+                (cp * xx - sp * yy + cx, sp * xx + cp * yy + cy)
+            };
+            let (c1x, c1y) = map(p1x, p1y);
+            let (c2x, c2y) = map(p2x, p2y);
+            let (ex, ey) = map(c2, s2);
+            pb.cubic_to(c1x, c1y, c2x, c2y, ex, ey);
+            a += delta;
+        }
+    }
+
+    fn box_blur_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, ch: usize, r: usize, horizontal: bool) {
+        if r == 0 {
+            dst.copy_from_slice(src);
+            return;
+        }
+        let (n_lines, len, stride_line, stride_el) = if horizontal { (h, w, w * ch, ch) } else { (w, h, ch, w * ch) };
+        let div = (2 * r + 1) as i64;
+        let last = len as i64 - 1;
+        for line in 0..n_lines {
+            let base = line * stride_line;
+            for c in 0..ch {
+                let at = |k: i64| -> i64 {
+                    let kk = k.max(0).min(last) as usize;
+                    src[base + kk * stride_el + c] as i64
+                };
+                let mut acc: i64 = 0;
+                for k in -(r as i64)..=(r as i64) {
+                    acc += at(k);
+                }
+                for i in 0..len as i64 {
+                    dst[base + (i as usize) * stride_el + c] = (acc / div) as u8;
+                    acc += at(i + r as i64 + 1) - at(i - r as i64);
+                }
+            }
+        }
+    }
+
+    pub fn gaussian_blur(buf: &mut Vec<u8>, w: usize, h: usize, ch: usize, sigma: f32) {
+        if sigma < 0.3 || w == 0 || h == 0 {
+            return;
+        }
+        let b = ((12.0 * sigma * sigma / 3.0 + 1.0).sqrt()).floor().max(1.0) as usize;
+        let r = (b - 1) / 2;
+        let mut tmp = vec![0u8; buf.len()];
+        for _ in 0..3 {
+            box_blur_pass(buf, &mut tmp, w, h, ch, r.max(1), true);
+            box_blur_pass(&tmp, buf, w, h, ch, r.max(1), false);
+        }
+    }
+
+    pub struct Painter<'a> {
+        base: &'a mut [u8],
+        pub w: u32,
+        pub h: u32,
+        pub scale: f32,
+        layers: Vec<(Pixmap, f32)>,
+        clips: Vec<Mask>,
+    }
+
+    impl<'a> Painter<'a> {
+        pub fn new(base: &'a mut [u8], w: u32, h: u32, scale: f32) -> Painter<'a> {
+            Painter { base, w, h, scale, layers: Vec::new(), clips: Vec::new() }
+        }
+
+        fn tf(&self) -> Transform {
+            Transform::from_scale(self.scale, self.scale)
+        }
+
+        fn with_target<R>(&mut self, f: impl FnOnce(&mut PixmapMut, Option<&Mask>) -> R) -> Option<R> {
+            let (w, h) = (self.w, self.h);
+            let clip = self.clips.last();
+            if let Some((pm, _)) = self.layers.last_mut() {
+                let mut m = pm.as_mut();
+                Some(f(&mut m, clip))
+            } else {
+                let mut m = PixmapMut::from_bytes(self.base, w, h)?;
+                Some(f(&mut m, clip))
+            }
+        }
+
+        fn fill_path(&mut self, path: &Path, paint: &Paint) {
+            let tf = self.tf();
+            self.with_target(|pm, clip| pm.fill_path(path, paint, FillRule::Winding, tf, clip));
+        }
+
+        pub fn rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], color: f64) {
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let mut paint = Paint::default();
+            paint.set_color(col(color));
+            paint.anti_alias = true;
+            if r == [0.0; 4] {
+                if let Some(rect) = Rect::from_xywh(x, y, w, h) {
+                    let tf = self.tf();
+                    self.with_target(|pm, clip| pm.fill_rect(rect, &paint, tf, clip));
+                }
+                return;
+            }
+            if let Some(p) = rrect_path(x, y, w, h, r) {
+                self.fill_path(&p, &paint);
+            }
+        }
+
+        pub fn stroke_rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], width: f32, color: f64) {
+            if w <= 0.0 || h <= 0.0 || width <= 0.0 {
+                return;
+            }
+            let hw = width / 2.0;
+            let r2 = [(r[0] - hw).max(0.0), (r[1] - hw).max(0.0), (r[2] - hw).max(0.0), (r[3] - hw).max(0.0)];
+            if let Some(p) = rrect_path(x + hw, y + hw, w - width, h - width, r2) {
+                let mut paint = Paint::default();
+                paint.set_color(col(color));
+                paint.anti_alias = true;
+                let mut st = Stroke::default();
+                st.width = width;
+                let tf = self.tf();
+                self.with_target(|pm, clip| pm.stroke_path(&p, &paint, &st, tf, clip));
+            }
+        }
+
+        pub fn lgrad(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], angle: f32, stops: &Vec<(f32, f64)>) {
+            if w <= 0.0 || h <= 0.0 || stops.is_empty() {
+                return;
+            }
+            let a = angle.to_radians();
+            let (dx, dy) = (a.sin(), -a.cos());
+            let len = (w * a.sin()).abs() + (h * a.cos()).abs();
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            let gs: Vec<GradientStop> = stops.iter().map(|(o, c)| GradientStop::new(*o, col(*c))).collect();
+            let sh = LinearGradient::new(
+                Point::from_xy(cx - dx * len / 2.0, cy - dy * len / 2.0),
+                Point::from_xy(cx + dx * len / 2.0, cy + dy * len / 2.0),
+                gs,
+                SpreadMode::Pad,
+                Transform::identity(),
+            );
+            if let Some(sh) = sh {
+                let mut paint = Paint::default();
+                paint.shader = sh;
+                paint.anti_alias = true;
+                if let Some(p) = rrect_path(x, y, w, h, r) {
+                    self.fill_path(&p, &paint);
+                }
+            }
+        }
+
+        pub fn rgrad(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], fx: f32, fy: f32, rad: f32, stops: &Vec<(f32, f64)>) {
+            if w <= 0.0 || h <= 0.0 || stops.is_empty() {
+                return;
+            }
+            let gs: Vec<GradientStop> = stops.iter().map(|(o, c)| GradientStop::new(*o, col(*c))).collect();
+            let c = Point::from_xy(x + w * fx, y + h * fy);
+            let sh = RadialGradient::new(c, c, rad.max(0.5), gs, SpreadMode::Pad, Transform::identity());
+            if let Some(sh) = sh {
+                let mut paint = Paint::default();
+                paint.shader = sh;
+                paint.anti_alias = true;
+                if let Some(p) = rrect_path(x, y, w, h, r) {
+                    self.fill_path(&p, &paint);
+                }
+            }
+        }
+
+        fn blit_a8(&mut self, px: i32, py: i32, w: u32, h: u32, a8: &[u8], color: Color, extra: Option<&Mask>) {
+            let (sw, sh) = (self.w as i32, self.h as i32);
+            let cr = (color.red() * 255.0) as u32;
+            let cg = (color.green() * 255.0) as u32;
+            let cb = (color.blue() * 255.0) as u32;
+            let ca = (color.alpha() * 255.0) as u32;
+            let clip_data: Option<Vec<u8>> = self.clips.last().map(|m| m.data().to_vec());
+            let extra_data: Option<&[u8]> = extra.map(|m| m.data());
+            let wrote = self.with_target(|pm, _| {
+                let data = pm.data_mut();
+                for yy in 0..h as i32 {
+                    let ty = py + yy;
+                    if ty < 0 || ty >= sh {
+                        continue;
+                    }
+                    for xx in 0..w as i32 {
+                        let tx = px + xx;
+                        if tx < 0 || tx >= sw {
+                            continue;
+                        }
+                        let mut cov = a8[(yy as u32 * w + xx as u32) as usize] as u32;
+                        if cov == 0 {
+                            continue;
+                        }
+                        let mi = (ty * sw + tx) as usize;
+                        if let Some(cd) = &clip_data {
+                            cov = cov * cd[mi] as u32 / 255;
+                        }
+                        if let Some(ed) = extra_data {
+                            cov = cov * ed[mi] as u32 / 255;
+                        }
+                        if cov == 0 {
+                            continue;
+                        }
+                        let ea = ca * cov / 255; // 0..255
+                        let i = mi * 4;
+                        let inv = 255 - ea;
+                        data[i] = ((cr * ea + data[i] as u32 * inv) / 255).min(255) as u8;
+                        data[i + 1] = ((cg * ea + data[i + 1] as u32 * inv) / 255).min(255) as u8;
+                        data[i + 2] = ((cb * ea + data[i + 2] as u32 * inv) / 255).min(255) as u8;
+                        data[i + 3] = ((ea * 255 + data[i + 3] as u32 * inv) / 255).min(255) as u8;
+                    }
+                }
+            });
+            let _ = wrote;
+        }
+
+        pub fn shadow(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], blur: f32, spread: f32, dx: f32, dy: f32, color: f64, inset: bool) {
+            let s = self.scale;
+            let sigma = (blur * s) / 2.0;
+            let margin = (blur * s * 1.6).ceil() as i32 + 2;
+            let bx = ((x + dx - spread) * s).floor() as i32;
+            let by = ((y + dy - spread) * s).floor() as i32;
+            let bw = ((w + 2.0 * spread) * s).ceil() as i32;
+            let bh = ((h + 2.0 * spread) * s).ceil() as i32;
+            let ox = (x * s).floor() as i32;
+            let oy = (y * s).floor() as i32;
+            let ow = (w * s).ceil() as i32;
+            let oh = (h * s).ceil() as i32;
+            let (rx0, ry0, rw, rh) = if inset {
+                (ox, oy, ow, oh)
+            } else {
+                let x0 = bx.min(ox) - margin;
+                let y0 = by.min(oy) - margin;
+                let x1 = (bx + bw).max(ox + ow) + margin;
+                let y1 = (by + bh).max(oy + oh) + margin;
+                (x0, y0, x1 - x0, y1 - y0)
+            };
+            if rw <= 0 || rh <= 0 || rw > 8192 || rh > 8192 {
+                return;
+            }
+            let (rw, rh) = (rw as u32, rh as u32);
+            let mut pm = match Pixmap::new(rw, rh) {
+                Some(p) => p,
+                None => return,
+            };
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(0, 0, 0, 255);
+            paint.anti_alias = true;
+            let rr = [r[0] + spread, r[1] + spread, r[2] + spread, r[3] + spread];
+            let local = Transform::from_translate(-(rx0 as f32), -(ry0 as f32)).pre_scale(s, s);
+            if inset {
+                pm.fill(Color::from_rgba8(0, 0, 0, 255));
+                let mut p2 = Paint::default();
+                p2.set_color_rgba8(0, 0, 0, 255);
+                p2.blend_mode = BlendMode::Clear;
+                p2.anti_alias = true;
+                let rr2 = [(r[0] - spread).max(0.0), (r[1] - spread).max(0.0), (r[2] - spread).max(0.0), (r[3] - spread).max(0.0)];
+                if let Some(p) = rrect_path(x + dx + spread, y + dy + spread, w - 2.0 * spread, h - 2.0 * spread, rr2) {
+                    pm.fill_path(&p, &p2, FillRule::Winding, local, None);
+                }
+            } else if let Some(p) = rrect_path(x + dx - spread, y + dy - spread, w + 2.0 * spread, h + 2.0 * spread, rr) {
+                pm.fill_path(&p, &paint, FillRule::Winding, local, None);
+            }
+            let mut a8: Vec<u8> = pm.data().chunks(4).map(|p| p[3]).collect();
+            gaussian_blur(&mut a8, rw as usize, rh as usize, 1, sigma);
+            let mut mk = match Mask::new(self.w, self.h) {
+                Some(m) => m,
+                None => return,
+            };
+            let tf = self.tf();
+            if let Some(bp) = rrect_path(x, y, w, h, r) {
+                if inset {
+                    mk.fill_path(&bp, FillRule::Winding, true, tf);
+                } else {
+                    let mut pb = PathBuilder::new();
+                    pb.push_rect(Rect::from_xywh(-10.0, -10.0, self.w as f32 / s + 20.0, self.h as f32 / s + 20.0).unwrap());
+                    if let Some(rp) = bp.clone().transform(Transform::identity()) {
+                        pb.push_path(&rp);
+                    }
+                    if let Some(big) = pb.finish() {
+                        mk.fill_path(&big, FillRule::EvenOdd, true, tf);
+                    }
+                }
+            }
+            self.blit_a8(rx0, ry0, rw, rh, &a8, col(color), Some(&mk));
+        }
+
+        pub fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4]) {
+            let mut m = match self.clips.last() {
+                Some(prev) => prev.clone(),
+                None => {
+                    let mut m = Mask::new(self.w, self.h).unwrap();
+                    m.data_mut().iter_mut().for_each(|b| *b = 255);
+                    m
+                }
+            };
+            let tf = self.tf();
+            if let Some(p) = rrect_path(x, y, w.max(0.0), h.max(0.0), r) {
+                if self.clips.is_empty() {
+                    m.clear();
+                    m.fill_path(&p, FillRule::Winding, true, tf);
+                } else {
+                    m.intersect_path(&p, FillRule::Winding, true, tf);
+                }
+            } else {
+                m.clear();
+            }
+            self.clips.push(m);
+        }
+
+        pub fn pop_clip(&mut self) {
+            self.clips.pop();
+        }
+
+        pub fn push_layer(&mut self, alpha: f32) {
+            if let Some(p) = Pixmap::new(self.w, self.h) {
+                self.layers.push((p, alpha));
+            }
+        }
+
+        pub fn pop_layer(&mut self) {
+            if let Some((pm, alpha)) = self.layers.pop() {
+                let mut pp = PixmapPaint::default();
+                pp.opacity = alpha.clamp(0.0, 1.0);
+                self.with_target(|t, _| t.draw_pixmap(0, 0, pm.as_ref(), &pp, Transform::identity(), None));
+            }
+        }
+
+        pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: f64, round: bool) {
+            let mut pb = PathBuilder::new();
+            pb.move_to(x1, y1);
+            pb.line_to(x2, y2);
+            if let Some(p) = pb.finish() {
+                let mut paint = Paint::default();
+                paint.set_color(col(color));
+                paint.anti_alias = true;
+                let mut st = Stroke::default();
+                st.width = width;
+                if round {
+                    st.line_cap = LineCap::Round;
+                }
+                let tf = self.tf();
+                self.with_target(|pm, clip| pm.stroke_path(&p, &paint, &st, tf, clip));
+            }
+        }
+
+        pub fn clear(&mut self, color: f64) {
+            let c = col(color);
+            self.with_target(|pm, _| pm.fill(c));
+        }
+
+        pub fn text(&mut self, x: f32, baseline: f32, size: f32, weight: i64, color: f64, s: &str, ls: f32) {
+            let sc = self.scale;
+            let size_px = size * sc;
+            let colr = col(color);
+            let mut pen = x * sc;
+            let by = (baseline * sc).round();
+            let mut prev: Option<(usize, u16)> = None;
+            let mut jobs: Vec<(Rc<Glyph>, i32, i32)> = Vec::new();
+            FONTS.with(|fo| {
+                let mut fo = fo.borrow_mut();
+                if fo.faces.is_empty() {
+                    return;
+                }
+                for c in s.chars() {
+                    let (fi, g) = face_for(&mut fo, weight, c);
+                    if let Some((pf, pg)) = prev {
+                        if pf == fi {
+                            pen += kern_pair(&fo.faces[fi], pg, g) * size_px;
+                        }
+                    }
+                    let ipen = pen.floor();
+                    let sub = (((pen - ipen) * 4.0) as u8).min(3);
+                    if c != ' ' {
+                        if let Some(gl) = raster_glyph(&mut fo, fi, g, size_px, sub) {
+                            jobs.push((gl, ipen as i32, by as i32));
+                        }
+                    }
+                    let adv = fo.faces[fi].face.glyph_hor_advance(ttf_parser::GlyphId(g)).unwrap_or(0) as f32 / fo.faces[fi].upem;
+                    pen += adv * size_px + ls * sc;
+                    prev = Some((fi, g));
+                }
+            });
+            for (gl, gx, gy) in jobs {
+                if gl.w == 0 {
+                    continue;
+                }
+                self.blit_a8(gx + gl.left, gy + gl.top, gl.w, gl.h, &gl.data, colr, None);
+            }
+        }
+
+        pub fn icon(&mut self, x: f32, y: f32, size: f32, color: f64, stroke_w: f32, name: &str) {
+            let paths: Option<Rc<Vec<Path>>> = FONTS.with(|fo| {
+                let mut fo = fo.borrow_mut();
+                if let Some(p) = fo.icons.get(name) {
+                    return Some(p.clone());
+                }
+                let src = fo.icon_src.get(name)?.clone();
+                let v: Vec<Path> = src.split(';').filter_map(|d| parse_svg_path(d)).collect();
+                let rc = Rc::new(v);
+                fo.icons.insert(name.to_string(), rc.clone());
+                Some(rc)
+            });
+            let paths = match paths {
+                Some(p) => p,
+                None => return,
+            };
+            let k = size / 24.0;
+            let mut paint = Paint::default();
+            paint.set_color(col(color));
+            paint.anti_alias = true;
+            let mut st = Stroke::default();
+            st.width = stroke_w.max(0.5);
+            st.line_cap = LineCap::Round;
+            st.line_join = LineJoin::Round;
+            let tf = self.tf().pre_translate(x, y).pre_scale(k, k);
+            for p in paths.iter() {
+                let (pp, stt, t) = (p.clone(), st.clone(), tf);
+                let pa = paint.clone();
+                self.with_target(|pm, clip| pm.stroke_path(&pp, &pa, &stt, t, clip));
+            }
+        }
+
+        pub fn svg_path(&mut self, x: f32, y: f32, scale: f32, fill: f64, stroke: f64, stroke_w: f32, d: &str) {
+            if let Some(p) = parse_svg_path(d) {
+                let tf = self.tf().pre_translate(x, y).pre_scale(scale, scale);
+                let fa = (fill as u32) & 255;
+                if fa > 0 {
+                    let mut paint = Paint::default();
+                    paint.set_color(col(fill));
+                    paint.anti_alias = true;
+                    self.with_target(|pm, clip| pm.fill_path(&p, &paint, FillRule::Winding, tf, clip));
+                }
+                if (stroke as u32) & 255 > 0 && stroke_w > 0.0 {
+                    let mut paint = Paint::default();
+                    paint.set_color(col(stroke));
+                    paint.anti_alias = true;
+                    let mut st = Stroke::default();
+                    st.width = stroke_w;
+                    st.line_cap = LineCap::Round;
+                    st.line_join = LineJoin::Round;
+                    self.with_target(|pm, clip| pm.stroke_path(&p, &paint, &st, tf, clip));
+                }
+            }
+        }
+
+        pub fn backdrop(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], blur: f32, tint: f64) {
+            let s = self.scale;
+            let x0 = ((x * s).floor() as i32).max(0);
+            let y0 = ((y * s).floor() as i32).max(0);
+            let x1 = (((x + w) * s).ceil() as i32).min(self.w as i32);
+            let y1 = (((y + h) * s).ceil() as i32).min(self.h as i32);
+            if x1 <= x0 || y1 <= y0 {
+                return;
+            }
+            let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+            let mut buf = vec![0u8; rw * rh * 4];
+            let stride = self.w as usize * 4;
+            let src_ok = self.with_target(|pm, _| {
+                let d = pm.data_mut();
+                for row in 0..rh {
+                    let so = (y0 as usize + row) * stride + x0 as usize * 4;
+                    buf[row * rw * 4..(row + 1) * rw * 4].copy_from_slice(&d[so..so + rw * 4]);
+                }
+            });
+            if src_ok.is_none() {
+                return;
+            }
+            gaussian_blur(&mut buf, rw, rh, 4, blur * s / 2.0);
+            let mut mk = match Mask::new(self.w, self.h) {
+                Some(m) => m,
+                None => return,
+            };
+            let tf = self.tf();
+            if let Some(p) = rrect_path(x, y, w, h, r) {
+                mk.fill_path(&p, FillRule::Winding, true, tf);
+            }
+            let clip_data: Option<Vec<u8>> = self.clips.last().map(|m| m.data().to_vec());
+            let sw = self.w as usize;
+            self.with_target(|pm, _| {
+                let d = pm.data_mut();
+                for row in 0..rh {
+                    for cx in 0..rw {
+                        let mi = (y0 as usize + row) * sw + x0 as usize + cx;
+                        let mut m = mk.data()[mi] as u32;
+                        if let Some(cd) = &clip_data {
+                            m = m * cd[mi] as u32 / 255;
+                        }
+                        if m == 0 {
+                            continue;
+                        }
+                        let si = (row * rw + cx) * 4;
+                        let di = mi * 4;
+                        for k in 0..4 {
+                            d[di + k] = ((buf[si + k] as u32 * m + d[di + k] as u32 * (255 - m)) / 255) as u8;
+                        }
+                    }
+                }
+            });
+            if (tint as u32) & 255 > 0 {
+                self.rrect(x, y, w, h, r, tint);
+            }
+        }
+    }
+
+    fn rd(ops: &Vec<f64>, i: &mut usize) -> f64 {
+        let v = if *i < ops.len() { ops[*i] } else { 0.0 };
+        *i += 1;
+        v
+    }
+
+    fn rd_stops(ops: &Vec<f64>, i: &mut usize) -> Vec<(f32, f64)> {
+        let n = rd(ops, i) as usize;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            let o = rd(ops, i) as f32;
+            let c = rd(ops, i);
+            v.push((o, c));
+        }
+        v
+    }
+
+    pub fn run_ops(buf: &mut [u8], w: u32, h: u32, scale: f32, ops: &Vec<f64>, strs: &Vec<String>) {
+        let mut p = Painter::new(buf, w, h, scale);
+        let mut i = 0usize;
+        while i < ops.len() {
+            let op = ops[i] as i64;
+            i += 1;
+            match op {
+                OP_CLEAR => {
+                    let c = rd(ops, &mut i);
+                    p.clear(c);
+                }
+                OP_RRECT => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    let c = rd(ops, &mut i);
+                    p.rrect(x, y, ww, hh, r, c);
+                }
+                OP_STROKE => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    let sw = rd(ops, &mut i) as f32;
+                    let c = rd(ops, &mut i);
+                    p.stroke_rrect(x, y, ww, hh, r, sw, c);
+                }
+                OP_LGRAD => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    let ang = rd(ops, &mut i) as f32;
+                    let st = rd_stops(ops, &mut i);
+                    p.lgrad(x, y, ww, hh, r, ang, &st);
+                }
+                OP_RGRAD => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    let (fx, fy, rad) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let st = rd_stops(ops, &mut i);
+                    p.rgrad(x, y, ww, hh, r, fx, fy, rad, &st);
+                }
+                OP_SHADOW => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    let (bl, sp, dx, dy) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let c = rd(ops, &mut i);
+                    let inset = rd(ops, &mut i) > 0.5;
+                    p.shadow(x, y, ww, hh, r, bl, sp, dx, dy, c, inset);
+                }
+                OP_TEXT => {
+                    let (x, y, size) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let wt = rd(ops, &mut i) as i64;
+                    let c = rd(ops, &mut i);
+                    let si = rd(ops, &mut i) as usize;
+                    let ls = rd(ops, &mut i) as f32;
+                    if si < strs.len() {
+                        p.text(x, y, size, wt, c, &strs[si], ls);
+                    }
+                }
+                OP_CLIP => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    p.push_clip(x, y, ww, hh, r);
+                }
+                OP_UNCLIP => p.pop_clip(),
+                OP_ICON => {
+                    let (x, y, size) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let c = rd(ops, &mut i);
+                    let sw = rd(ops, &mut i) as f32;
+                    let si = rd(ops, &mut i) as usize;
+                    if si < strs.len() {
+                        p.icon(x, y, size, c, sw, &strs[si]);
+                    }
+                }
+                OP_BACKDROP => {
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
+                    let bl = rd(ops, &mut i) as f32;
+                    let tint = rd(ops, &mut i);
+                    p.backdrop(x, y, ww, hh, r, bl, tint);
+                }
+                OP_LAYER => {
+                    let a = rd(ops, &mut i) as f32;
+                    p.push_layer(a);
+                }
+                OP_ENDLAYER => p.pop_layer(),
+                OP_LINE => {
+                    let (x1, y1, x2, y2) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let wd = rd(ops, &mut i) as f32;
+                    let c = rd(ops, &mut i);
+                    let cap = rd(ops, &mut i) > 0.5;
+                    p.line(x1, y1, x2, y2, wd, c, cap);
+                }
+                OP_PATH => {
+                    let (x, y, sc) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let fill = rd(ops, &mut i);
+                    let stroke = rd(ops, &mut i);
+                    let sw = rd(ops, &mut i) as f32;
+                    let si = rd(ops, &mut i) as usize;
+                    if si < strs.len() {
+                        p.svg_path(x, y, sc, fill, stroke, sw, &strs[si]);
+                    }
+                }
+                _ => break,
+            }
+        }
+        let _ = MaskType::Alpha;
+    }
+
+}
+
+pub mod wl {
+    use super::paint;
+    use std::collections::HashMap;
+    use std::os::fd::{AsFd, OwnedFd};
+    use std::time::{Duration, Instant};
+    use wayland_client::globals::{registry_queue_init, GlobalListContents};
+    use wayland_client::protocol::wl_buffer::{self, WlBuffer};
+    use wayland_client::protocol::wl_callback::{self, WlCallback};
+    use wayland_client::protocol::wl_compositor::WlCompositor;
+    use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
+    use wayland_client::protocol::wl_output::{self, WlOutput};
+    use wayland_client::protocol::wl_pointer::{self, WlPointer};
+    use wayland_client::protocol::wl_registry::{self, WlRegistry};
+    use wayland_client::protocol::wl_seat::{self, WlSeat};
+    use wayland_client::protocol::wl_shm::{self, WlShm};
+    use wayland_client::protocol::wl_shm_pool::WlShmPool;
+    use wayland_client::protocol::wl_surface::{self, WlSurface};
+    use wayland_client::protocol::wl_touch::{self, WlTouch};
+    use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+    use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1};
+    use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+    use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+    use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{self, WpFractionalScaleV1};
+    use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+    use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+    use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
+    use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1};
+    use wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
+    use wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
+    use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
+    use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
+    use wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager;
+    use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
+    use wayland_client::protocol::wl_data_source::{self, WlDataSource};
+    use wayland_client::event_created_child;
+    use wayland_protocols::ext::idle_notify::v1::client::ext_idle_notification_v1::{self, ExtIdleNotificationV1};
+    use wayland_protocols::ext::idle_notify::v1::client::ext_idle_notifier_v1::ExtIdleNotifierV1;
+    use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1;
+    use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1};
+    use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_v1::{self, ExtSessionLockV1};
+    use wayland_protocols::wp::idle_inhibit::zv1::client::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1;
+    use wayland_protocols::wp::idle_inhibit::zv1::client::zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1;
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1};
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1};
+    use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1};
+    use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1};
+
+    pub struct ShmBuf {
+        pub buf: WlBuffer,
+        pub ptr: *mut u8,
+        pub len: usize,
+        pub w: u32,
+        pub h: u32,
+        pub busy: bool,
+    }
+
+    pub struct Win {
+        pub id: u32,
+        pub kind: String,
+        pub surface: WlSurface,
+        pub xdg: Option<(XdgSurface, XdgToplevel)>,
+        pub layer: Option<ZwlrLayerSurfaceV1>,
+        pub viewport: Option<WpViewport>,
+        pub frac: Option<WpFractionalScaleV1>,
+        pub decor: Option<ZxdgToplevelDecorationV1>,
+        pub lock_surf: Option<ExtSessionLockSurfaceV1>,
+        pub inhibitor: Option<ZwpIdleInhibitorV1>,
+        pub w: u32,
+        pub h: u32,
+        pub scale: f32,
+        pub int_scale: i32,
+        pub configured: bool,
+        pub bufs: Vec<Option<ShmBuf>>,
+        pub frame_pending: bool,
+    }
+
+    pub struct OutInfo {
+        pub proxy: WlOutput,
+        pub name: String,
+        pub x: i32,
+        pub y: i32,
+        pub w: i32,
+        pub h: i32,
+        pub scale: i32,
+        pub ready: bool,
+    }
+
+    pub struct Repeat {
+        pub code: u32,
+        pub win: u32,
+        pub next: Instant,
+    }
+
+    pub struct Xkb {
+        ctx: *mut xkbcommon_dl::xkb_context,
+        keymap: *mut xkbcommon_dl::xkb_keymap,
+        state: *mut xkbcommon_dl::xkb_state,
+    }
+
+    pub struct WlState {
+        pub compositor: Option<WlCompositor>,
+        pub shm: Option<WlShm>,
+        pub wm_base: Option<XdgWmBase>,
+        pub seat: Option<WlSeat>,
+        pub layer_shell: Option<ZwlrLayerShellV1>,
+        pub viewporter: Option<WpViewporter>,
+        pub frac_mgr: Option<WpFractionalScaleManagerV1>,
+        pub cursor_mgr: Option<WpCursorShapeManagerV1>,
+        pub cursor_dev: Option<WpCursorShapeDeviceV1>,
+        pub decor_mgr: Option<ZxdgDecorationManagerV1>,
+        pub wins: HashMap<u32, Win>,
+        pub next_id: u32,
+        pub outputs: Vec<OutInfo>,
+        pub events: Vec<String>,
+        pub ptr_focus: Option<u32>,
+        pub kb_focus: Option<u32>,
+        pub enter_serial: u32,
+        pub px: f64,
+        pub py: f64,
+        pub mods: u32,
+        pub xkb: Option<Xkb>,
+        pub repeat: Option<Repeat>,
+        pub rate: i32,
+        pub delay: i32,
+        pub scroll_x: f64,
+        pub scroll_y: f64,
+        pub globals: Vec<String>,
+        pub lock_mgr: Option<ExtSessionLockManagerV1>,
+        pub lock: Option<ExtSessionLockV1>,
+        pub locked: bool,
+        pub idle_notifier: Option<ExtIdleNotifierV1>,
+        pub idle_notifs: Vec<ExtIdleNotificationV1>,
+        pub inhibit_mgr: Option<ZwpIdleInhibitManagerV1>,
+        pub ftl_mgr: Option<ZwlrForeignToplevelManagerV1>,
+        pub toplevels: HashMap<u32, TopInfo>,
+        pub next_top: u32,
+        pub data_mgr: Option<WlDataDeviceManager>,
+        pub data_dev: Option<WlDataDevice>,
+        pub selection: Option<WlDataOffer>,
+        pub offer_mimes: HashMap<u32, Vec<String>>,
+        pub clip_out: String,
+        pub clip_source: Option<WlDataSource>,
+        pub last_serial: u32,
+    }
+
+    pub struct TopInfo {
+        pub handle: ZwlrForeignToplevelHandleV1,
+        pub title: String,
+        pub app_id: String,
+        pub state: String,
+    }
+
+    pub struct Wl {
+        pub conn: Connection,
+        pub queue: EventQueue<WlState>,
+        pub qh: QueueHandle<WlState>,
+        pub st: WlState,
+    }
+
+    impl Xkb {
+        fn new(data: &[u8]) -> Option<Xkb> {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            unsafe {
+                let ctx = (h.xkb_context_new)(xkbcommon_dl::xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
+                if ctx.is_null() {
+                    return None;
+                }
+                let mut v = data.to_vec();
+                if v.last() != Some(&0) {
+                    v.push(0);
+                }
+                let km = (h.xkb_keymap_new_from_string)(ctx, v.as_ptr() as *const _, xkbcommon_dl::xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1, xkbcommon_dl::xkb_keymap_compile_flags::XKB_KEYMAP_COMPILE_NO_FLAGS);
+                if km.is_null() {
+                    return None;
+                }
+                let st = (h.xkb_state_new)(km);
+                if st.is_null() {
+                    return None;
+                }
+                Some(Xkb { ctx, keymap: km, state: st })
+            }
+        }
+        fn update(&mut self, dep: u32, lat: u32, lock: u32, group: u32) {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            unsafe {
+                (h.xkb_state_update_mask)(self.state, dep, lat, lock, 0, 0, group);
+            }
+        }
+        fn sym(&self, code: u32) -> u32 {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            unsafe { (h.xkb_state_key_get_one_sym)(self.state, code + 8) }
+        }
+        fn utf8(&self, code: u32) -> String {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            let mut buf = [0i8; 16];
+            unsafe {
+                let n = (h.xkb_state_key_get_utf8)(self.state, code + 8, buf.as_mut_ptr(), 16);
+                if n <= 0 {
+                    return String::new();
+                }
+                let bytes: Vec<u8> = buf[..(n as usize).min(15)].iter().map(|b| *b as u8).collect();
+                String::from_utf8_lossy(&bytes).to_string()
+            }
+        }
+        fn repeats(&self, code: u32) -> bool {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            unsafe { (h.xkb_keymap_key_repeats)(self.keymap, code + 8) != 0 }
+        }
+        fn mod_active(&self, name: &[u8]) -> bool {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            unsafe {
+                let idx = (h.xkb_keymap_mod_get_index)(self.keymap, name.as_ptr() as *const _);
+                if idx == xkbcommon_dl::XKB_MOD_INVALID {
+                    return false;
+                }
+                (h.xkb_state_mod_index_is_active)(self.state, idx, xkbcommon_dl::xkb_state_component::XKB_STATE_MODS_EFFECTIVE) > 0
+            }
+        }
+        fn sym_name(sym: u32) -> String {
+            let h = xkbcommon_dl::xkbcommon_handle();
+            let mut buf = [0i8; 64];
+            unsafe {
+                let n = (h.xkb_keysym_get_name)(sym, buf.as_mut_ptr(), 64);
+                if n <= 0 {
+                    return String::new();
+                }
+                let bytes: Vec<u8> = buf[..(n as usize).min(63)].iter().map(|b| *b as u8).collect();
+                String::from_utf8_lossy(&bytes).to_string()
+            }
+        }
+    }
+
+    pub fn canon_key_name(sym_name: &str, text: &str) -> String {
+        let n = match sym_name {
+            "Return" | "KP_Enter" => "Enter",
+            "BackSpace" => "Backspace",
+            "ISO_Left_Tab" | "Tab" => "Tab",
+            "Escape" => "Escape",
+            "Delete" | "KP_Delete" => "Delete",
+            "Home" | "KP_Home" => "Home",
+            "End" | "KP_End" => "End",
+            "Left" | "KP_Left" => "ArrowLeft",
+            "Right" | "KP_Right" => "ArrowRight",
+            "Up" | "KP_Up" => "ArrowUp",
+            "Down" | "KP_Down" => "ArrowDown",
+            "Page_Up" | "Prior" => "PageUp",
+            "Page_Down" | "Next" => "PageDown",
+            "Insert" => "Insert",
+            "Shift_L" | "Shift_R" => "Shift",
+            "Control_L" | "Control_R" => "Control",
+            "Alt_L" | "Alt_R" => "Alt",
+            "Super_L" | "Super_R" => "Super",
+            "ISO_Level3_Shift" => "AltGr",
+            "Caps_Lock" => "CapsLock",
+            "Menu" => "Menu",
+            "space" => "Space",
+            _ => "",
+        };
+        if !n.is_empty() {
+            return n.to_string();
+        }
+        if sym_name.starts_with('F') && sym_name.len() <= 3 && sym_name[1..].chars().all(|c| c.is_ascii_digit()) {
+            return sym_name.to_string();
+        }
+        if !text.is_empty() {
+            return text.to_string();
+        }
+        sym_name.to_string()
+    }
+
+    pub fn fallback_key(code: u32, shift: bool, altgr: bool, caps: bool) -> (String, String) {
+        const ROW1: &str = "1234567890-=";
+        const ROW2: &str = "qwertyuiop";
+        const ROW3: &str = "asdfghjkl";
+        const ROW4: &str = "zxcvbnm";
+        let sh1 = "!@#$%^&*()_+";
+        let pick = |s: &str, i: usize| -> Option<char> { s.chars().nth(i) };
+        let mut ch: Option<char> = None;
+        let mut lower = ' ';
+        if (2..=13).contains(&code) {
+            let i = (code - 2) as usize;
+            ch = if shift { pick(sh1, i) } else { pick(ROW1, i) };
+        } else if (16..=25).contains(&code) {
+            lower = pick(ROW2, (code - 16) as usize).unwrap();
+        } else if (30..=38).contains(&code) {
+            lower = pick(ROW3, (code - 30) as usize).unwrap();
+        } else if (44..=50).contains(&code) {
+            lower = pick(ROW4, (code - 44) as usize).unwrap();
+        } else {
+            let t = match code {
+                57 => Some((' ', ' ')),
+                26 => Some(('[', '{')),
+                27 => Some((']', '}')),
+                39 => Some((';', ':')),
+                40 => Some(('\'', '"')),
+                41 => Some(('`', '~')),
+                43 => Some(('\\', '|')),
+                51 => Some((',', '<')),
+                52 => Some(('.', '>')),
+                53 => Some(('/', '?')),
+                _ => None,
+            };
+            if let Some((a, b)) = t {
+                ch = Some(if shift { b } else { a });
+            }
+        }
+        if lower != ' ' {
+            if altgr {
+                let pl = match lower {
+                    'a' => Some(('ą', 'Ą')),
+                    'c' => Some(('ć', 'Ć')),
+                    'e' => Some(('ę', 'Ę')),
+                    'l' => Some(('ł', 'Ł')),
+                    'n' => Some(('ń', 'Ń')),
+                    'o' => Some(('ó', 'Ó')),
+                    's' => Some(('ś', 'Ś')),
+                    'x' => Some(('ź', 'Ź')),
+                    'z' => Some(('ż', 'Ż')),
+                    _ => None,
+                };
+                if let Some((a, b)) = pl {
+                    ch = Some(if shift ^ caps { b } else { a });
+                }
+            }
+            if ch.is_none() {
+                ch = Some(if shift ^ caps { lower.to_ascii_uppercase() } else { lower });
+            }
+        }
+        let name = match code {
+            1 => "Escape",
+            14 => "Backspace",
+            15 => "Tab",
+            28 | 96 => "Enter",
+            57 => "Space",
+            102 => "Home",
+            103 => "ArrowUp",
+            104 => "PageUp",
+            105 => "ArrowLeft",
+            106 => "ArrowRight",
+            107 => "End",
+            108 => "ArrowDown",
+            109 => "PageDown",
+            110 => "Insert",
+            111 => "Delete",
+            42 | 54 => "Shift",
+            29 | 97 => "Control",
+            56 => "Alt",
+            100 => "AltGr",
+            125 | 126 => "Super",
+            58 => "CapsLock",
+            59..=68 => "",
+            _ => "",
+        };
+        if (59..=68).contains(&code) {
+            return (format!("F{}", code - 58), String::new());
+        }
+        if !name.is_empty() {
+            let text = if code == 57 { " ".to_string() } else if code == 28 || code == 96 { "\n".to_string() } else if code == 15 { "\t".to_string() } else { String::new() };
+            return (name.to_string(), text);
+        }
+        match ch {
+            Some(c) => (c.to_string(), c.to_string()),
+            None => (String::new(), String::new()),
+        }
+    }
+
+    fn make_shm(len: usize) -> Option<(OwnedFd, *mut u8)> {
+        use rustix::fs::{ftruncate, memfd_create, MemfdFlags};
+        use rustix::mm::{mmap, MapFlags, ProtFlags};
+        let fd = memfd_create("gui-shm", MemfdFlags::CLOEXEC).ok()?;
+        ftruncate(&fd, len as u64).ok()?;
+        let p = unsafe { mmap(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, MapFlags::SHARED, &fd, 0).ok()? };
+        Some((fd, p as *mut u8))
+    }
+
+    impl Win {
+        fn phys(&self) -> (u32, u32) {
+            (((self.w as f32) * self.scale).round().max(1.0) as u32, ((self.h as f32) * self.scale).round().max(1.0) as u32)
+        }
+    }
+
+    impl WlState {
+        fn push(&mut self, s: String) {
+            self.events.push(s);
+        }
+
+        fn apply_scale(&mut self, id: u32) {
+            let (qh_ok, _) = (true, 0);
+            let _ = qh_ok;
+            if let Some(w) = self.wins.get_mut(&id) {
+                if w.viewport.is_none() {
+                    let s = w.scale.ceil().max(1.0) as i32;
+                    if s != w.int_scale {
+                        w.int_scale = s;
+                        w.surface.set_buffer_scale(s);
+                    }
+                }
+            }
+        }
+
+        fn mods_bits(&self) -> u32 {
+            self.mods
+        }
+    }
+
+    fn shape_from(name: &str) -> Shape {
+        match name {
+            "pointer" | "hand" => Shape::Pointer,
+            "text" => Shape::Text,
+            "wait" => Shape::Wait,
+            "progress" => Shape::Progress,
+            "crosshair" => Shape::Crosshair,
+            "move" => Shape::Move,
+            "grab" => Shape::Grab,
+            "grabbing" => Shape::Grabbing,
+            "not-allowed" => Shape::NotAllowed,
+            "ew-resize" => Shape::EwResize,
+            "ns-resize" => Shape::NsResize,
+            "nesw-resize" => Shape::NeswResize,
+            "nwse-resize" => Shape::NwseResize,
+            "help" => Shape::Help,
+            _ => Shape::Default,
+        }
+    }
+
+    impl Wl {
+        pub fn connect() -> Result<Wl, String> {
+            let conn = Connection::connect_to_env().map_err(|e| format!("{}", e))?;
+            let (globals, mut queue) = registry_queue_init::<WlState>(&conn).map_err(|e| format!("{}", e))?;
+            let qh = queue.handle();
+            let mut st = WlState {
+                compositor: None,
+                shm: None,
+                wm_base: None,
+                seat: None,
+                layer_shell: None,
+                viewporter: None,
+                frac_mgr: None,
+                cursor_mgr: None,
+                cursor_dev: None,
+                decor_mgr: None,
+                wins: HashMap::new(),
+                next_id: 1,
+                outputs: Vec::new(),
+                events: Vec::new(),
+                ptr_focus: None,
+                kb_focus: None,
+                enter_serial: 0,
+                px: 0.0,
+                py: 0.0,
+                mods: 0,
+                xkb: None,
+                repeat: None,
+                rate: 25,
+                delay: 500,
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                globals: Vec::new(),
+                lock_mgr: None,
+                lock: None,
+                locked: false,
+                idle_notifier: None,
+                idle_notifs: Vec::new(),
+                inhibit_mgr: None,
+                ftl_mgr: None,
+                toplevels: HashMap::new(),
+                next_top: 1,
+                data_mgr: None,
+                data_dev: None,
+                selection: None,
+                offer_mimes: HashMap::new(),
+                clip_out: String::new(),
+                clip_source: None,
+                last_serial: 0,
+            };
+            for g in globals.contents().clone_list() {
+                st.globals.push(format!("{}:{}", g.interface, g.version));
+                match g.interface.as_str() {
+                    "wl_compositor" => st.compositor = Some(globals.registry().bind(g.name, g.version.min(6), &qh, ())),
+                    "wl_shm" => st.shm = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "xdg_wm_base" => st.wm_base = Some(globals.registry().bind(g.name, g.version.min(5), &qh, ())),
+                    "wl_seat" => st.seat = Some(globals.registry().bind(g.name, g.version.min(7), &qh, ())),
+                    "zwlr_layer_shell_v1" => st.layer_shell = Some(globals.registry().bind(g.name, g.version.min(4), &qh, ())),
+                    "wp_viewporter" => st.viewporter = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "wp_fractional_scale_manager_v1" => st.frac_mgr = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "wp_cursor_shape_manager_v1" => st.cursor_mgr = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "ext_session_lock_manager_v1" => st.lock_mgr = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "ext_idle_notifier_v1" => st.idle_notifier = Some(globals.registry().bind(g.name, g.version.min(1), &qh, ())),
+                    "zwp_idle_inhibit_manager_v1" => st.inhibit_mgr = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "zwlr_foreign_toplevel_manager_v1" => st.ftl_mgr = Some(globals.registry().bind(g.name, g.version.min(3), &qh, ())),
+                    "wl_data_device_manager" => st.data_mgr = Some(globals.registry().bind(g.name, g.version.min(3), &qh, ())),
+                    "zxdg_decoration_manager_v1" => st.decor_mgr = Some(globals.registry().bind(g.name, 1, &qh, ())),
+                    "wl_output" => {
+                        let o: WlOutput = globals.registry().bind(g.name, g.version.min(4), &qh, st.outputs.len() as u32);
+                        st.outputs.push(OutInfo { proxy: o, name: String::new(), x: 0, y: 0, w: 0, h: 0, scale: 1, ready: false });
+                    }
+                    _ => {}
+                }
+            }
+            if st.compositor.is_none() || st.shm.is_none() {
+                return Err("compositor bez wl_compositor/wl_shm".to_string());
+            }
+            if let (Some(dm), Some(seat)) = (&st.data_mgr, &st.seat) {
+                st.data_dev = Some(dm.get_data_device(seat, &qh, ()));
+            }
+            let _ = queue.roundtrip(&mut st);
+            let _ = queue.roundtrip(&mut st);
+            Ok(Wl { conn, queue, qh, st })
+        }
+
+        pub fn create_window(&mut self, kind: &str, title: &str, w: u32, h: u32, opts: &str) -> i64 {
+            let o: HashMap<String, String> = opts
+                .split(';')
+                .filter_map(|kv| {
+                    let mut it = kv.splitn(2, '=');
+                    let k = it.next()?.trim().to_string();
+                    let v = it.next().unwrap_or("").trim().to_string();
+                    if k.is_empty() { None } else { Some((k, v)) }
+                })
+                .collect();
+            let id = self.st.next_id;
+            self.st.next_id += 1;
+            let qh = self.qh.clone();
+            let comp = self.st.compositor.clone().unwrap();
+            let surface = comp.create_surface(&qh, id);
+            let mut win = Win {
+                id,
+                kind: kind.to_string(),
+                surface: surface.clone(),
+                xdg: None,
+                layer: None,
+                viewport: None,
+                frac: None,
+                decor: None,
+                lock_surf: None,
+                inhibitor: None,
+                w: w.max(1),
+                h: h.max(1),
+                scale: 1.0,
+                int_scale: 1,
+                configured: false,
+                bufs: vec![None, None],
+                frame_pending: false,
+            };
+            if let Some(vp) = &self.st.viewporter {
+                win.viewport = Some(vp.get_viewport(&surface, &qh, ()));
+            }
+            if let Some(fm) = &self.st.frac_mgr {
+                win.frac = Some(fm.get_fractional_scale(&surface, &qh, id));
+            }
+            if kind == "layer" {
+                let ls = match &self.st.layer_shell {
+                    Some(l) => l.clone(),
+                    None => return -1,
+                };
+                let layer = match o.get("layer").map(|s| s.as_str()).unwrap_or("top") {
+                    "background" => Layer::Background,
+                    "bottom" => Layer::Bottom,
+                    "overlay" => Layer::Overlay,
+                    _ => Layer::Top,
+                };
+                let out = o.get("output").and_then(|n| self.st.outputs.iter().find(|x| &x.name == n)).map(|x| x.proxy.clone());
+                let ns = o.get("ns").cloned().unwrap_or_else(|| "gui".to_string());
+                let l = ls.get_layer_surface(&surface, out.as_ref(), layer, ns, &qh, id);
+                let mut anchor = Anchor::empty();
+                for a in o.get("anchor").map(|s| s.as_str()).unwrap_or("").split(',') {
+                    match a.trim() {
+                        "top" => anchor |= Anchor::Top,
+                        "bottom" => anchor |= Anchor::Bottom,
+                        "left" => anchor |= Anchor::Left,
+                        "right" => anchor |= Anchor::Right,
+                        _ => {}
+                    }
+                }
+                l.set_anchor(anchor);
+                l.set_size(if o.get("fill_w").is_some() { 0 } else { w }, if o.get("fill_h").is_some() { 0 } else { h });
+                if let Some(e) = o.get("exclusive") {
+                    l.set_exclusive_zone(e.parse().unwrap_or(0));
+                }
+                if let Some(m) = o.get("margin") {
+                    let v: Vec<i32> = m.split(',').map(|x| x.trim().parse().unwrap_or(0)).collect();
+                    if v.len() == 4 {
+                        l.set_margin(v[0], v[1], v[2], v[3]);
+                    }
+                }
+                l.set_keyboard_interactivity(match o.get("kb").map(|s| s.as_str()).unwrap_or("none") {
+                    "exclusive" => KeyboardInteractivity::Exclusive,
+                    "ondemand" => KeyboardInteractivity::OnDemand,
+                    _ => KeyboardInteractivity::None,
+                });
+                win.layer = Some(l);
+            } else if kind == "lock" {
+                let lk = match &self.st.lock {
+                    Some(l) => l.clone(),
+                    None => return -1,
+                };
+                let out = match o.get("output").and_then(|n| self.st.outputs.iter().find(|x| &x.name == n)).or(self.st.outputs.first()) {
+                    Some(x) => x.proxy.clone(),
+                    None => return -1,
+                };
+                win.lock_surf = Some(lk.get_lock_surface(&surface, &out, &qh, id));
+            } else {
+                let wm = match &self.st.wm_base {
+                    Some(w) => w.clone(),
+                    None => return -1,
+                };
+                let xs = wm.get_xdg_surface(&surface, &qh, id);
+                let tl = xs.get_toplevel(&qh, id);
+                tl.set_title(title.to_string());
+                tl.set_app_id(o.get("app_id").cloned().unwrap_or_else(|| "gui".to_string()));
+                if let Some(m) = o.get("min") {
+                    let v: Vec<i32> = m.split(',').map(|x| x.trim().parse().unwrap_or(0)).collect();
+                    if v.len() == 2 {
+                        tl.set_min_size(v[0], v[1]);
+                    }
+                }
+                if o.get("fullscreen").is_some() {
+                    tl.set_fullscreen(None);
+                }
+                if let Some(dm) = &self.st.decor_mgr {
+                    let d = dm.get_toplevel_decoration(&tl, &qh, id);
+                    if o.get("decor").map(|s| s.as_str()) != Some("client") {
+                        d.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+                    } else {
+                        d.set_mode(zxdg_toplevel_decoration_v1::Mode::ClientSide);
+                    }
+                    win.decor = Some(d);
+                }
+                win.xdg = Some((xs, tl));
+            }
+            if kind != "lock" {
+                surface.commit();
+            }
+            self.st.wins.insert(id, win);
+            let _ = self.queue.roundtrip(&mut self.st);
+            let _ = self.conn.flush();
+            id as i64
+        }
+
+        pub fn draw(&mut self, id: u32, ops: &Vec<f64>, strs: &Vec<String>) -> bool {
+            let qh = self.qh.clone();
+            let shm = match &self.st.shm {
+                Some(s) => s.clone(),
+                None => return false,
+            };
+            let win = match self.st.wins.get_mut(&id) {
+                Some(w) => w,
+                None => return true,
+            };
+            if !win.configured {
+                return false;
+            }
+            let (pw, ph) = win.phys();
+            let mut idx = 2usize;
+            for i in 0..win.bufs.len() {
+                match &win.bufs[i] {
+                    Some(b) if b.busy => {}
+                    _ => {
+                        idx = i;
+                        break;
+                    }
+                }
+            }
+            if idx == 2 {
+                return false;
+            }
+            let need_new = match &win.bufs[idx] {
+                Some(b) => b.w != pw || b.h != ph,
+                None => true,
+            };
+            if need_new {
+                if let Some(old) = win.bufs[idx].take() {
+                    old.buf.destroy();
+                    unsafe {
+                        let _ = rustix::mm::munmap(old.ptr as *mut _, old.len);
+                    }
+                }
+                let stride = pw * 4;
+                let len = (stride * ph) as usize;
+                let (fd, ptr) = match make_shm(len) {
+                    Some(x) => x,
+                    None => return true,
+                };
+                let pool: WlShmPool = shm.create_pool(fd.as_fd(), len as i32, &qh, ());
+                let buf = pool.create_buffer(0, pw as i32, ph as i32, stride as i32, wl_shm::Format::Argb8888, &qh, (id, idx as u32));
+                pool.destroy();
+                win.bufs[idx] = Some(ShmBuf { buf, ptr, len, w: pw, h: ph, busy: false });
+            }
+            let b = win.bufs[idx].as_mut().unwrap();
+            let slice = unsafe { std::slice::from_raw_parts_mut(b.ptr, b.len) };
+            paint::run_ops(slice, pw, ph, win.scale, ops, strs);
+            b.busy = true;
+            win.surface.attach(Some(&b.buf), 0, 0);
+            win.surface.damage_buffer(0, 0, pw as i32, ph as i32);
+            if let Some(vp) = &win.viewport {
+                vp.set_destination(win.w as i32, win.h as i32);
+            }
+            if !win.frame_pending {
+                win.frame_pending = true;
+                win.surface.frame(&qh, id);
+            }
+            win.surface.commit();
+            let _ = self.conn.flush();
+            true
+        }
+
+        pub fn lock_session(&mut self) -> bool {
+            let qh = self.qh.clone();
+            if let Some(m) = &self.st.lock_mgr {
+                if self.st.lock.is_none() {
+                    self.st.lock = Some(m.lock(&qh, ()));
+                    let _ = self.queue.roundtrip(&mut self.st);
+                    return true;
+                }
+            }
+            false
+        }
+
+        pub fn unlock_session(&mut self) {
+            if let Some(l) = self.st.lock.take() {
+                l.unlock_and_destroy();
+                self.st.locked = false;
+            }
+            let _ = self.queue.roundtrip(&mut self.st);
+        }
+
+        pub fn idle_watch(&mut self, ms: u32) {
+            let qh = self.qh.clone();
+            if let (Some(n), Some(seat)) = (&self.st.idle_notifier, &self.st.seat) {
+                let h = n.get_idle_notification(ms, seat, &qh, ms);
+                self.st.idle_notifs.push(h);
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn inhibit_idle(&mut self, id: u32, on: bool) {
+            let qh = self.qh.clone();
+            let mgr = self.st.inhibit_mgr.clone();
+            if let (Some(m), Some(w)) = (mgr, self.st.wins.get_mut(&id)) {
+                if on && w.inhibitor.is_none() {
+                    w.inhibitor = Some(m.create_inhibitor(&w.surface, &qh, ()));
+                } else if !on {
+                    if let Some(i) = w.inhibitor.take() {
+                        i.destroy();
+                    }
+                }
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn toplevel_action(&mut self, handle: u32, action: &str) {
+            let seat = self.st.seat.clone();
+            if let Some(t) = self.st.toplevels.get(&handle) {
+                match action {
+                    "activate" => {
+                        if let Some(s) = &seat {
+                            t.handle.activate(s);
+                        }
+                    }
+                    "close" => t.handle.close(),
+                    "minimize" => t.handle.set_minimized(),
+                    "unminimize" => t.handle.unset_minimized(),
+                    "maximize" => t.handle.set_maximized(),
+                    "unmaximize" => t.handle.unset_maximized(),
+                    _ => {}
+                }
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn clip_set(&mut self, text: &str) {
+            let qh = self.qh.clone();
+            if let (Some(dm), Some(dd)) = (&self.st.data_mgr, &self.st.data_dev) {
+                let src = dm.create_data_source(&qh, ());
+                src.offer("text/plain;charset=utf-8".to_string());
+                src.offer("text/plain".to_string());
+                src.offer("UTF8_STRING".to_string());
+                dd.set_selection(Some(&src), self.st.last_serial);
+                self.st.clip_out = text.to_string();
+                self.st.clip_source = Some(src);
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn clip_get(&mut self) -> String {
+            let off = match &self.st.selection {
+                Some(o) => o.clone(),
+                None => return String::new(),
+            };
+            let mimes = self.st.offer_mimes.get(&off.id().protocol_id()).cloned().unwrap_or_default();
+            let mime = if mimes.iter().any(|m| m == "text/plain;charset=utf-8") {
+                "text/plain;charset=utf-8"
+            } else if mimes.iter().any(|m| m == "text/plain") {
+                "text/plain"
+            } else if mimes.iter().any(|m| m == "UTF8_STRING") {
+                "UTF8_STRING"
+            } else {
+                return String::new();
+            };
+            let (rd, wr) = match rustix::pipe::pipe() {
+                Ok(p) => p,
+                Err(_) => return String::new(),
+            };
+            off.receive(mime.to_string(), wr.as_fd());
+            drop(wr);
+            let _ = self.conn.flush();
+            let mut out: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 4096];
+            let start = Instant::now();
+            loop {
+                let mut pfd = [rustix::event::PollFd::new(&rd, rustix::event::PollFlags::IN)];
+                let r = rustix::event::poll(&mut pfd, 100).unwrap_or(0);
+                if r > 0 {
+                    match rustix::io::read(&rd, &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => out.extend_from_slice(&buf[..n]),
+                        Err(_) => break,
+                    }
+                }
+                if start.elapsed() > Duration::from_millis(400) || out.len() > 8_000_000 {
+                    break;
+                }
+            }
+            String::from_utf8_lossy(&out).to_string()
+        }
+
+        pub fn set_title(&mut self, id: u32, title: &str) {
+            if let Some(w) = self.st.wins.get(&id) {
+                if let Some((_, tl)) = &w.xdg {
+                    tl.set_title(title.to_string());
+                }
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn set_cursor(&mut self, name: &str) {
+            if let Some(d) = &self.st.cursor_dev {
+                d.set_shape(self.st.enter_serial, shape_from(name));
+                let _ = self.conn.flush();
+            }
+        }
+
+        pub fn resize_layer(&mut self, id: u32, w: u32, h: u32) {
+            if let Some(win) = self.st.wins.get(&id) {
+                if let Some(l) = &win.layer {
+                    l.set_size(w, h);
+                    win.surface.commit();
+                }
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn close_window(&mut self, id: u32) {
+            if let Some(mut w) = self.st.wins.remove(&id) {
+                for b in w.bufs.iter_mut() {
+                    if let Some(old) = b.take() {
+                        old.buf.destroy();
+                        unsafe {
+                            let _ = rustix::mm::munmap(old.ptr as *mut _, old.len);
+                        }
+                    }
+                }
+                if let Some(l) = w.layer.take() {
+                    l.destroy();
+                }
+                if let Some(l) = w.lock_surf.take() {
+                    l.destroy();
+                }
+                if let Some(i) = w.inhibitor.take() {
+                    i.destroy();
+                }
+                if let Some(d) = w.decor.take() {
+                    d.destroy();
+                }
+                if let Some((xs, tl)) = w.xdg.take() {
+                    tl.destroy();
+                    xs.destroy();
+                }
+                if let Some(v) = w.viewport.take() {
+                    v.destroy();
+                }
+                if let Some(f) = w.frac.take() {
+                    f.destroy();
+                }
+                w.surface.destroy();
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn poll(&mut self, timeout_ms: i64) -> Vec<String> {
+            let _ = self.queue.dispatch_pending(&mut self.st);
+            let _ = self.conn.flush();
+            let mut wait = timeout_ms;
+            if let Some(r) = &self.st.repeat {
+                let now = Instant::now();
+                let d = if r.next > now { (r.next - now).as_millis() as i64 } else { 0 };
+                if wait < 0 || d < wait {
+                    wait = d;
+                }
+            }
+            if self.st.events.is_empty() && wait != 0 {
+                if let Some(guard) = self.queue.prepare_read() {
+                    let fd = guard.connection_fd();
+                    let mut pfd = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+                    let ready = rustix::event::poll(&mut pfd, wait as i32).unwrap_or(0);
+                    if ready > 0 {
+                        let _ = guard.read();
+                    } else {
+                        drop(guard);
+                    }
+                }
+                let _ = self.queue.dispatch_pending(&mut self.st);
+            } else if self.st.events.is_empty() {
+                if let Some(guard) = self.queue.prepare_read() {
+                    let _ = guard.read();
+                }
+                let _ = self.queue.dispatch_pending(&mut self.st);
+            }
+            let now = Instant::now();
+            let mut rep: Option<(u32, u32)> = None;
+            if let Some(r) = &mut self.st.repeat {
+                if now >= r.next {
+                    rep = Some((r.code, r.win));
+                    let step = if self.st.rate > 0 { 1000 / self.st.rate as u64 } else { 40 };
+                    r.next = now + Duration::from_millis(step.max(10));
+                }
+            }
+            if let Some((code, win)) = rep {
+                let ev = self.st.key_event(win, code, true, true);
+                self.st.events.push(ev);
+            }
+            let _ = self.conn.flush();
+            std::mem::take(&mut self.st.events)
+        }
+    }
+
+    impl WlState {
+        fn key_event(&self, win: u32, code: u32, down: bool, repeat: bool) -> String {
+            let (name, text) = if let Some(x) = &self.xkb {
+                let sym = x.sym(code);
+                let mut sn = Xkb::sym_name(sym);
+                let uc = unsafe { (xkbcommon_dl::xkbcommon_handle().xkb_keysym_to_utf32)(sym) };
+                if uc > 32 && uc != 127 {
+                    if let Some(c) = char::from_u32(uc) {
+                        sn = c.to_string();
+                    }
+                }
+                let mut text = if down { x.utf8(code) } else { String::new() };
+                if text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+                    text.clear();
+                }
+                (canon_key_name(&sn, &text), text)
+            } else {
+                let sh = self.mods & 1 != 0;
+                let ag = self.mods & 128 != 0;
+                let caps = self.mods & 2 != 0;
+                let (n, mut t) = fallback_key(code, sh, ag, caps);
+                if !down {
+                    t.clear();
+                }
+                (n, t)
+            };
+            format!("key\t{}\t{}\t{}\t{}\t{}\t{}", win, if down { 1 } else { 0 }, if repeat { 1 } else { 0 }, name.replace('\t', "Tab"), text.replace('\t', "\\t").replace('\n', "\\n"), self.mods_norm())
+        }
+        fn mods_norm(&self) -> u32 {
+            self.mods & 31
+        }
+    }
+
+    delegate_noop!(WlState: WlCompositor);
+    delegate_noop!(WlState: ignore WlShm);
+    delegate_noop!(WlState: ignore WlShmPool);
+    delegate_noop!(WlState: ZwlrLayerShellV1);
+    delegate_noop!(WlState: WpViewporter);
+    delegate_noop!(WlState: WpViewport);
+    delegate_noop!(WlState: WpFractionalScaleManagerV1);
+    delegate_noop!(WlState: WpCursorShapeManagerV1);
+    delegate_noop!(WlState: WpCursorShapeDeviceV1);
+    delegate_noop!(WlState: ZxdgDecorationManagerV1);
+
+    impl Dispatch<WlRegistry, GlobalListContents> for WlState {
+        fn event(state: &mut Self, reg: &WlRegistry, ev: wl_registry::Event, _: &GlobalListContents, _: &Connection, qh: &QueueHandle<Self>) {
+            if let wl_registry::Event::Global { name, interface, version } = ev {
+                if interface == "wl_output" {
+                    let o: WlOutput = reg.bind(name, version.min(4), qh, state.outputs.len() as u32);
+                    state.outputs.push(OutInfo { proxy: o, name: String::new(), x: 0, y: 0, w: 0, h: 0, scale: 1, ready: false });
+                }
+            }
+        }
+    }
+
+    impl Dispatch<WlOutput, u32> for WlState {
+        fn event(state: &mut Self, _: &WlOutput, ev: wl_output::Event, idx: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            let i = *idx as usize;
+            if i >= state.outputs.len() {
+                return;
+            }
+            match ev {
+                wl_output::Event::Geometry { x, y, .. } => {
+                    state.outputs[i].x = x;
+                    state.outputs[i].y = y;
+                }
+                wl_output::Event::Mode { flags, width, height, .. } => {
+                    if let WEnum::Value(f) = flags {
+                        if f.contains(wl_output::Mode::Current) {
+                            state.outputs[i].w = width;
+                            state.outputs[i].h = height;
+                        }
+                    }
+                }
+                wl_output::Event::Scale { factor } => state.outputs[i].scale = factor,
+                wl_output::Event::Name { name } => state.outputs[i].name = name,
+                wl_output::Event::Done => {
+                    let o = &state.outputs[i];
+                    let s = format!("output\t{}\t{}\t{}\t{}\t{}\t{}", o.name, o.x, o.y, o.w, o.h, o.scale);
+                    state.outputs[i].ready = true;
+                    state.events.push(s);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<XdgWmBase, ()> for WlState {
+        fn event(_: &mut Self, wm: &XdgWmBase, ev: xdg_wm_base::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            if let xdg_wm_base::Event::Ping { serial } = ev {
+                wm.pong(serial);
+            }
+        }
+    }
+
+    impl Dispatch<WlSurface, u32> for WlState {
+        fn event(state: &mut Self, _: &WlSurface, ev: wl_surface::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            if let wl_surface::Event::Enter { output } = ev {
+                let mut sc = 1;
+                for o in &state.outputs {
+                    if o.proxy == output {
+                        sc = o.scale;
+                    }
+                }
+                if let Some(w) = state.wins.get_mut(id) {
+                    if w.frac.is_none() && sc as f32 != w.scale {
+                        w.scale = sc as f32;
+                        let (lw, lh) = (w.w, w.h);
+                        state.apply_scale(*id);
+                        state.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw, lh, sc));
+                    }
+                }
+            }
+        }
+    }
+
+    impl Dispatch<XdgSurface, u32> for WlState {
+        fn event(state: &mut Self, xs: &XdgSurface, ev: xdg_surface::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            if let xdg_surface::Event::Configure { serial } = ev {
+                xs.ack_configure(serial);
+                if let Some(w) = state.wins.get_mut(id) {
+                    let first = !w.configured;
+                    w.configured = true;
+                    let (lw, lh, sc) = (w.w, w.h, w.scale);
+                    state.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw, lh, sc));
+                    if first {
+                        state.events.push(format!("ready\t{}", id));
+                    }
+                }
+            }
+        }
+    }
+
+    impl Dispatch<XdgToplevel, u32> for WlState {
+        fn event(state: &mut Self, _: &XdgToplevel, ev: xdg_toplevel::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                xdg_toplevel::Event::Configure { width, height, states } => {
+                    if let Some(w) = state.wins.get_mut(id) {
+                        if width > 0 {
+                            w.w = width as u32;
+                        }
+                        if height > 0 {
+                            w.h = height as u32;
+                        }
+                    }
+                    let mut flags = String::new();
+                    for s in states.chunks(4) {
+                        if s.len() == 4 {
+                            let v = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]);
+                            match v {
+                                1 => flags.push_str("maximized,"),
+                                2 => flags.push_str("fullscreen,"),
+                                4 => flags.push_str("activated,"),
+                                _ => {}
+                            }
+                        }
+                    }
+                    state.events.push(format!("state\t{}\t{}", id, flags));
+                }
+                xdg_toplevel::Event::Close => state.events.push(format!("close\t{}", id)),
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<ZxdgToplevelDecorationV1, u32> for WlState {
+        fn event(state: &mut Self, _: &ZxdgToplevelDecorationV1, ev: zxdg_toplevel_decoration_v1::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = ev {
+                let server = matches!(mode, WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide));
+                state.events.push(format!("decor\t{}\t{}", id, if server { "server" } else { "client" }));
+            }
+        }
+    }
+
+    impl Dispatch<ZwlrLayerSurfaceV1, u32> for WlState {
+        fn event(state: &mut Self, ls: &ZwlrLayerSurfaceV1, ev: zwlr_layer_surface_v1::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+                    ls.ack_configure(serial);
+                    if let Some(w) = state.wins.get_mut(id) {
+                        if width > 0 {
+                            w.w = width;
+                        }
+                        if height > 0 {
+                            w.h = height;
+                        }
+                        let first = !w.configured;
+                        w.configured = true;
+                        let (lw, lh, sc) = (w.w, w.h, w.scale);
+                        state.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw, lh, sc));
+                        if first {
+                            state.events.push(format!("ready\t{}", id));
+                        }
+                    }
+                }
+                zwlr_layer_surface_v1::Event::Closed => state.events.push(format!("close\t{}", id)),
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<WpFractionalScaleV1, u32> for WlState {
+        fn event(state: &mut Self, _: &WpFractionalScaleV1, ev: wp_fractional_scale_v1::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            if let wp_fractional_scale_v1::Event::PreferredScale { scale } = ev {
+                if let Some(w) = state.wins.get_mut(id) {
+                    w.scale = scale as f32 / 120.0;
+                    let (lw, lh, sc) = (w.w, w.h, w.scale);
+                    state.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw, lh, sc));
+                }
+            }
+        }
+    }
+
+    impl Dispatch<WlBuffer, (u32, u32)> for WlState {
+        fn event(state: &mut Self, _: &WlBuffer, ev: wl_buffer::Event, d: &(u32, u32), _: &Connection, _: &QueueHandle<Self>) {
+            if let wl_buffer::Event::Release = ev {
+                if let Some(w) = state.wins.get_mut(&d.0) {
+                    if let Some(Some(b)) = w.bufs.get_mut(d.1 as usize) {
+                        b.busy = false;
+                    }
+                }
+            }
+        }
+    }
+
+    impl Dispatch<WlCallback, u32> for WlState {
+        fn event(state: &mut Self, _: &WlCallback, ev: wl_callback::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            if let wl_callback::Event::Done { .. } = ev {
+                if let Some(w) = state.wins.get_mut(id) {
+                    w.frame_pending = false;
+                    state.events.push(format!("frame\t{}", id));
+                }
+            }
+        }
+    }
+
+    impl Dispatch<WlSeat, ()> for WlState {
+        fn event(state: &mut Self, seat: &WlSeat, ev: wl_seat::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
+            if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(caps) } = ev {
+                if caps.contains(wl_seat::Capability::Pointer) {
+                    let p = seat.get_pointer(qh, ());
+                    if let Some(cm) = &state.cursor_mgr {
+                        state.cursor_dev = Some(cm.get_pointer(&p, qh, ()));
+                    }
+                }
+                if caps.contains(wl_seat::Capability::Keyboard) {
+                    seat.get_keyboard(qh, ());
+                }
+                if caps.contains(wl_seat::Capability::Touch) {
+                    seat.get_touch(qh, ());
+                }
+            }
+        }
+    }
+
+    impl Dispatch<WlPointer, ()> for WlState {
+        fn event(state: &mut Self, _: &WlPointer, ev: wl_pointer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } => {
+                    state.enter_serial = serial;
+                    state.last_serial = serial;
+                    let id = surface.data::<u32>().copied();
+                    state.ptr_focus = id;
+                    state.px = surface_x;
+                    state.py = surface_y;
+                    if let Some(id) = id {
+                        state.events.push(format!("ptr_move\t{}\t{:.2}\t{:.2}", id, surface_x, surface_y));
+                    }
+                }
+                wl_pointer::Event::Leave { .. } => {
+                    if let Some(id) = state.ptr_focus.take() {
+                        state.events.push(format!("ptr_leave\t{}", id));
+                    }
+                }
+                wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
+                    state.px = surface_x;
+                    state.py = surface_y;
+                    if let Some(id) = state.ptr_focus {
+                        if let Some(last) = state.events.last() {
+                            if last.starts_with("ptr_move\t") {
+                                state.events.pop();
+                            }
+                        }
+                        state.events.push(format!("ptr_move\t{}\t{:.2}\t{:.2}", id, surface_x, surface_y));
+                    }
+                }
+                wl_pointer::Event::Button { button, state: bs, serial, .. } => {
+                    state.last_serial = serial;
+                    if let Some(id) = state.ptr_focus {
+                        let down = matches!(bs, WEnum::Value(wl_pointer::ButtonState::Pressed));
+                        let b = match button {
+                            272 => 0,
+                            273 => 2,
+                            274 => 1,
+                            other => other as i64 - 272,
+                        };
+                        state.events.push(format!("ptr_{}\t{}\t{}\t{:.2}\t{:.2}", if down { "down" } else { "up" }, id, b, state.px, state.py));
+                    }
+                }
+                wl_pointer::Event::Axis { axis, value, .. } => {
+                    if let WEnum::Value(a) = axis {
+                        if a == wl_pointer::Axis::VerticalScroll {
+                            state.scroll_y += value;
+                        } else {
+                            state.scroll_x += value;
+                        }
+                    }
+                }
+                wl_pointer::Event::Frame => {
+                    if (state.scroll_x != 0.0 || state.scroll_y != 0.0) && state.ptr_focus.is_some() {
+                        let id = state.ptr_focus.unwrap();
+                        state.events.push(format!("scroll\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}", id, state.scroll_x, state.scroll_y, state.px, state.py));
+                        state.scroll_x = 0.0;
+                        state.scroll_y = 0.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<WlKeyboard, ()> for WlState {
+        fn event(state: &mut Self, _: &WlKeyboard, ev: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                wl_keyboard::Event::Keymap { fd, size, .. } => {
+                    use std::io::Read;
+                    let mut f = std::fs::File::from(fd);
+                    let mut data = vec![0u8; size as usize];
+                    if f.read_exact(&mut data).is_ok() {
+                        state.xkb = std::panic::catch_unwind(|| Xkb::new(&data)).ok().flatten();
+                    }
+                }
+                wl_keyboard::Event::Enter { surface, serial, .. } => {
+                    state.last_serial = serial;
+                    let id = surface.data::<u32>().copied();
+                    state.kb_focus = id;
+                    if let Some(id) = id {
+                        state.events.push(format!("focus\t{}\t1", id));
+                    }
+                }
+                wl_keyboard::Event::Leave { .. } => {
+                    state.repeat = None;
+                    if let Some(id) = state.kb_focus.take() {
+                        state.events.push(format!("focus\t{}\t0", id));
+                    }
+                }
+                wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
+                    if let Some(x) = &mut state.xkb {
+                        x.update(mods_depressed, mods_latched, mods_locked, group);
+                        let mut m = 0;
+                        if x.mod_active(b"Shift\0") {
+                            m |= 1;
+                        }
+                        if x.mod_active(b"Control\0") {
+                            m |= 2;
+                        }
+                        if x.mod_active(b"Mod1\0") {
+                            m |= 4;
+                        }
+                        if x.mod_active(b"Mod4\0") {
+                            m |= 8;
+                        }
+                        if x.mod_active(b"Lock\0") {
+                            m |= 16;
+                        }
+                        state.mods = m;
+                    } else {
+                        let all = mods_depressed | mods_latched | mods_locked;
+                        let mut m = 0;
+                        if all & 1 != 0 {
+                            m |= 1;
+                        }
+                        if all & 4 != 0 {
+                            m |= 2;
+                        }
+                        if all & 8 != 0 {
+                            m |= 4;
+                        }
+                        if all & 64 != 0 {
+                            m |= 8;
+                        }
+                        if all & 2 != 0 {
+                            m |= 16;
+                        }
+                        state.mods = m | (all & 128);
+                    }
+                }
+                wl_keyboard::Event::Key { key, state: ks, serial, .. } => {
+                    state.last_serial = serial;
+                    let down = matches!(ks, WEnum::Value(wl_keyboard::KeyState::Pressed));
+                    if let Some(id) = state.kb_focus {
+                        let ev = state.key_event(id, key, down, false);
+                        state.events.push(ev);
+                        if down {
+                            let can = match &state.xkb {
+                                Some(x) => x.repeats(key),
+                                None => true,
+                            };
+                            if can && state.rate > 0 {
+                                state.repeat = Some(Repeat { code: key, win: id, next: Instant::now() + Duration::from_millis(state.delay as u64) });
+                            }
+                        } else if let Some(r) = &state.repeat {
+                            if r.code == key {
+                                state.repeat = None;
+                            }
+                        }
+                    }
+                }
+                wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                    state.rate = rate;
+                    state.delay = delay;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<WlTouch, ()> for WlState {
+        fn event(state: &mut Self, _: &WlTouch, ev: wl_touch::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                wl_touch::Event::Down { surface, id, x, y, .. } => {
+                    if let Some(w) = surface.data::<u32>() {
+                        state.events.push(format!("touch_down\t{}\t{}\t{:.2}\t{:.2}", w, id, x, y));
+                    }
+                }
+                wl_touch::Event::Motion { id, x, y, .. } => {
+                    state.events.push(format!("touch_move\t0\t{}\t{:.2}\t{:.2}", id, x, y));
+                }
+                wl_touch::Event::Up { id, .. } => {
+                    state.events.push(format!("touch_up\t0\t{}\t0\t0", id));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    delegate_noop!(WlState: ExtSessionLockManagerV1);
+    delegate_noop!(WlState: ExtIdleNotifierV1);
+    delegate_noop!(WlState: ZwpIdleInhibitManagerV1);
+    delegate_noop!(WlState: ZwpIdleInhibitorV1);
+    delegate_noop!(WlState: WlDataDeviceManager);
+
+    impl Dispatch<ExtSessionLockV1, ()> for WlState {
+        fn event(state: &mut Self, _: &ExtSessionLockV1, ev: ext_session_lock_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                ext_session_lock_v1::Event::Locked => {
+                    state.locked = true;
+                    state.events.push("lock\tlocked".to_string());
+                }
+                ext_session_lock_v1::Event::Finished => {
+                    state.locked = false;
+                    state.lock = None;
+                    state.events.push("lock\tfinished".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<ExtSessionLockSurfaceV1, u32> for WlState {
+        fn event(state: &mut Self, ls: &ExtSessionLockSurfaceV1, ev: ext_session_lock_surface_v1::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            if let ext_session_lock_surface_v1::Event::Configure { serial, width, height } = ev {
+                ls.ack_configure(serial);
+                if let Some(w) = state.wins.get_mut(id) {
+                    w.w = width.max(1);
+                    w.h = height.max(1);
+                    let first = !w.configured;
+                    w.configured = true;
+                    let (lw, lh, sc) = (w.w, w.h, w.scale);
+                    state.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw, lh, sc));
+                    if first {
+                        state.events.push(format!("ready\t{}", id));
+                    }
+                }
+            }
+        }
+    }
+
+    impl Dispatch<ExtIdleNotificationV1, u32> for WlState {
+        fn event(state: &mut Self, _: &ExtIdleNotificationV1, ev: ext_idle_notification_v1::Event, ms: &u32, _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                ext_idle_notification_v1::Event::Idled => state.events.push(format!("idle\t{}\t1", ms)),
+                ext_idle_notification_v1::Event::Resumed => state.events.push(format!("idle\t{}\t0", ms)),
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WlState {
+        fn event(state: &mut Self, _: &ZwlrForeignToplevelManagerV1, ev: zwlr_foreign_toplevel_manager_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            if let zwlr_foreign_toplevel_manager_v1::Event::Finished = ev {
+                state.ftl_mgr = None;
+            }
+        }
+        event_created_child!(WlState, ZwlrForeignToplevelManagerV1, [
+            zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ())
+        ]);
+    }
+
+    impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WlState {
+        fn event(state: &mut Self, h: &ZwlrForeignToplevelHandleV1, ev: zwlr_foreign_toplevel_handle_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            let hid = h.id().protocol_id();
+            if !state.toplevels.contains_key(&hid) {
+                state.toplevels.insert(hid, TopInfo { handle: h.clone(), title: String::new(), app_id: String::new(), state: String::new() });
+            }
+            match ev {
+                zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
+                    if let Some(t) = state.toplevels.get_mut(&hid) {
+                        t.title = title;
+                    }
+                }
+                zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                    if let Some(t) = state.toplevels.get_mut(&hid) {
+                        t.app_id = app_id;
+                    }
+                }
+                zwlr_foreign_toplevel_handle_v1::Event::State { state: st } => {
+                    let mut flags: Vec<&str> = Vec::new();
+                    for c in st.chunks(4) {
+                        if c.len() == 4 {
+                            match u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) {
+                                0 => flags.push("maximized"),
+                                1 => flags.push("minimized"),
+                                2 => flags.push("activated"),
+                                3 => flags.push("fullscreen"),
+                                _ => {}
+                            }
+                        }
+                    }
+                    if let Some(t) = state.toplevels.get_mut(&hid) {
+                        t.state = flags.join(",");
+                    }
+                }
+                zwlr_foreign_toplevel_handle_v1::Event::Done => {
+                    if let Some(t) = state.toplevels.get(&hid) {
+                        let s = format!("toplevel\t{}\t{}\t{}\t{}", hid, t.title.replace('\t', " "), t.app_id.replace('\t', " "), t.state);
+                        state.events.push(s);
+                    }
+                }
+                zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                    state.toplevels.remove(&hid);
+                    state.events.push(format!("toplevel_closed\t{}", hid));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<WlDataDevice, ()> for WlState {
+        fn event(state: &mut Self, _: &WlDataDevice, ev: wl_data_device::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                wl_data_device::Event::Selection { id } => {
+                    state.selection = id;
+                    state.events.push("clip_changed".to_string());
+                }
+                _ => {}
+            }
+        }
+        event_created_child!(WlState, WlDataDevice, [
+            wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, ())
+        ]);
+    }
+
+    impl Dispatch<WlDataOffer, ()> for WlState {
+        fn event(state: &mut Self, o: &WlDataOffer, ev: wl_data_offer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            if let wl_data_offer::Event::Offer { mime_type } = ev {
+                state.offer_mimes.entry(o.id().protocol_id()).or_default().push(mime_type);
+            }
+        }
+    }
+
+    impl Dispatch<WlDataSource, ()> for WlState {
+        fn event(state: &mut Self, src: &WlDataSource, ev: wl_data_source::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match ev {
+                wl_data_source::Event::Send { mime_type: _, fd } => {
+                    let mut f = std::fs::File::from(fd);
+                    use std::io::Write;
+                    let _ = f.write_all(state.clip_out.as_bytes());
+                }
+                wl_data_source::Event::Cancelled => {
+                    src.destroy();
+                    state.clip_source = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+}
+
+pub mod x11 {
+    use super::paint;
+    use std::collections::HashMap;
+    use std::os::fd::AsFd;
+    use std::time::{Duration, Instant};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::*;
+    use x11rb::protocol::Event;
+    use x11rb::rust_connection::RustConnection;
+    use x11rb::wrapper::ConnectionExt as _;
+    use x11rb::COPY_DEPTH_FROM_PARENT;
+
+    pub struct XWin {
+        pub id: u32,
+        pub xid: u32,
+        pub kind: String,
+        pub w: u32,
+        pub h: u32,
+        pub buf: Vec<u8>,
+        pub mapped: bool,
+        pub focused: bool,
+    }
+
+    pub struct X11 {
+        pub conn: RustConnection,
+        pub root: u32,
+        pub depth: u8,
+        pub gc: u32,
+        pub sw: u32,
+        pub sh: u32,
+        pub scale: f32,
+        pub wins: HashMap<u32, XWin>,
+        pub by_xid: HashMap<u32, u32>,
+        pub next_id: u32,
+        pub events: Vec<String>,
+        pub keymap: Vec<u32>,
+        pub per: usize,
+        pub min_kc: u8,
+        pub atoms: HashMap<&'static str, u32>,
+        pub clip_out: String,
+        pub clip_in: Option<String>,
+        pub clip_owner: u32,
+        pub cursors: HashMap<String, u32>,
+        pub cursor_font: u32,
+        pub last_ptr: (f64, f64),
+        pub ptr_win: u32,
+    }
+
+    fn atom(c: &RustConnection, name: &str) -> u32 {
+        c.intern_atom(false, name.as_bytes()).ok().and_then(|r| r.reply().ok()).map(|r| r.atom).unwrap_or(0)
+    }
+
+    pub fn keysym_char(sym: u32) -> Option<char> {
+        if (0x20..=0x7e).contains(&sym) || (0xa0..=0xff).contains(&sym) {
+            return char::from_u32(sym);
+        }
+        if sym & 0xff000000 == 0x01000000 {
+            return char::from_u32(sym & 0x00ffffff);
+        }
+        let c = match sym {
+            0x1a1 => 'Ą',
+            0x1b1 => 'ą',
+            0x1c6 => 'Ć',
+            0x1e6 => 'ć',
+            0x1ca => 'Ę',
+            0x1ea => 'ę',
+            0x1a3 => 'Ł',
+            0x1b3 => 'ł',
+            0x1d1 => 'Ń',
+            0x1f1 => 'ń',
+            0x1a6 => 'Ś',
+            0x1b6 => 'ś',
+            0x1ac => 'Ź',
+            0x1bc => 'ź',
+            0x1af => 'Ż',
+            0x1bf => 'ż',
+            0x1c0 => 'Ŕ',
+            0x1c5 => 'Ĺ',
+            0x1d8 => 'Ř',
+            0x1a9 => 'Š',
+            0x1b9 => 'š',
+            0x1ae => 'Ž',
+            0x1be => 'ž',
+            0x20ac => '€',
+            _ => return None,
+        };
+        Some(c)
+    }
+
+    pub fn keysym_name(sym: u32) -> Option<&'static str> {
+        Some(match sym {
+            0xff0d | 0xff8d => "Enter",
+            0xff08 => "Backspace",
+            0xff09 | 0xfe20 => "Tab",
+            0xff1b => "Escape",
+            0xffff | 0xff9f => "Delete",
+            0xff50 | 0xff95 => "Home",
+            0xff57 | 0xff9c => "End",
+            0xff51 | 0xff96 => "ArrowLeft",
+            0xff52 | 0xff97 => "ArrowUp",
+            0xff53 | 0xff98 => "ArrowRight",
+            0xff54 | 0xff99 => "ArrowDown",
+            0xff55 | 0xff9a => "PageUp",
+            0xff56 | 0xff9b => "PageDown",
+            0xff63 => "Insert",
+            0xffe1 | 0xffe2 => "Shift",
+            0xffe3 | 0xffe4 => "Control",
+            0xffe9 | 0xffea => "Alt",
+            0xffeb | 0xffec => "Super",
+            0xfe03 => "AltGr",
+            0xffe5 => "CapsLock",
+            0x20 => "Space",
+            _ => return None,
+        })
+    }
+
+    impl X11 {
+        pub fn connect() -> Result<X11, String> {
+            let (conn, sn) = RustConnection::connect(None).map_err(|e| format!("{}", e))?;
+            let setup = conn.setup().clone();
+            let screen = setup.roots[sn].clone();
+            let gc = conn.generate_id().map_err(|e| format!("{}", e))?;
+            conn.create_gc(gc, screen.root, &CreateGCAux::new()).map_err(|e| format!("{}", e))?;
+            let mut atoms: HashMap<&'static str, u32> = HashMap::new();
+            for n in [
+                "WM_PROTOCOLS", "WM_DELETE_WINDOW", "_NET_WM_NAME", "UTF8_STRING", "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_NORMAL",
+                "_NET_WM_WINDOW_TYPE_DOCK", "_NET_WM_WINDOW_TYPE_DESKTOP", "_NET_WM_WINDOW_TYPE_DIALOG", "_NET_WM_WINDOW_TYPE_NOTIFICATION",
+                "_NET_WM_WINDOW_TYPE_POPUP_MENU", "_NET_WM_STRUT_PARTIAL", "_NET_WM_STATE", "_NET_WM_STATE_ABOVE", "_NET_WM_STATE_BELOW",
+                "_NET_WM_STATE_STICKY", "_NET_WM_STATE_FULLSCREEN", "CLIPBOARD", "GUI_CLIP", "TARGETS", "_NET_WM_STATE_SKIP_TASKBAR",
+            ] {
+                atoms.insert(n, atom(&conn, n));
+            }
+            let kmin = setup.min_keycode;
+            let kmax = setup.max_keycode;
+            let km = conn.get_keyboard_mapping(kmin, kmax - kmin + 1).map_err(|e| format!("{}", e))?.reply().map_err(|e| format!("{}", e))?;
+            let mut scale = 1.0f32;
+            if let Ok(v) = std::env::var("GUI_SCALE") {
+                scale = v.parse().unwrap_or(1.0);
+            } else if let Ok(r) = conn.get_property(false, screen.root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, 65536).map_err(|e| e.to_string()).and_then(|c| c.reply().map_err(|e| e.to_string())) {
+                let txt = String::from_utf8_lossy(&r.value).to_string();
+                for line in txt.lines() {
+                    if let Some(rest) = line.strip_prefix("Xft.dpi:") {
+                        if let Ok(d) = rest.trim().parse::<f32>() {
+                            scale = (d / 96.0 * 4.0).round() / 4.0;
+                        }
+                    }
+                }
+            }
+            let cursor_font = conn.generate_id().map_err(|e| format!("{}", e))?;
+            let _ = conn.open_font(cursor_font, b"cursor");
+            Ok(X11 {
+                conn,
+                root: screen.root,
+                depth: screen.root_depth,
+                gc,
+                sw: screen.width_in_pixels as u32,
+                sh: screen.height_in_pixels as u32,
+                scale: scale.max(1.0),
+                wins: HashMap::new(),
+                by_xid: HashMap::new(),
+                next_id: 1,
+                events: Vec::new(),
+                keymap: km.keysyms,
+                per: km.keysyms_per_keycode as usize,
+                min_kc: kmin,
+                atoms,
+                clip_out: String::new(),
+                clip_in: None,
+                clip_owner: 0,
+                cursors: HashMap::new(),
+                cursor_font,
+                last_ptr: (0.0, 0.0),
+                ptr_win: 0,
+            })
+        }
+
+        fn a(&self, n: &str) -> u32 {
+            *self.atoms.get(n).unwrap_or(&0)
+        }
+
+        pub fn create_window(&mut self, kind: &str, title: &str, w: u32, h: u32, opts: &str) -> i64 {
+            if kind == "lock" {
+                return -1;
+            }
+            let o: HashMap<String, String> = opts
+                .split(';')
+                .filter_map(|kv| {
+                    let mut it = kv.splitn(2, '=');
+                    let k = it.next()?.trim().to_string();
+                    let v = it.next().unwrap_or("").trim().to_string();
+                    if k.is_empty() { None } else { Some((k, v)) }
+                })
+                .collect();
+            let anchor: Vec<String> = o.get("anchor").map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
+            let has = |n: &str| anchor.iter().any(|x| x == n);
+            let mut ww = w.max(1);
+            let mut hh = h.max(1);
+            let (mut x, mut y) = (0i32, 0i32);
+            if kind == "layer" {
+                let (sw, sh) = (self.sw as i32 / self.scale as i32, self.sh as i32 / self.scale as i32);
+                let (sw, sh) = if self.scale > 1.0 { (self.sw as i32, self.sh as i32) } else { (sw, sh) };
+                if has("left") && has("right") || o.contains_key("fill_w") {
+                    ww = (sw as u32) / 1;
+                }
+                if has("top") && has("bottom") || o.contains_key("fill_h") {
+                    hh = sh as u32;
+                }
+                let mg: Vec<i32> = o.get("margin").map(|m| m.split(',').map(|v| v.trim().parse().unwrap_or(0)).collect()).unwrap_or_else(|| vec![0, 0, 0, 0]);
+                let (mt, mr, mb, ml) = if mg.len() == 4 { (mg[0], mg[1], mg[2], mg[3]) } else { (0, 0, 0, 0) };
+                let pw = (ww as f32 * if o.contains_key("fill_w") || (has("left") && has("right")) { 1.0 } else { self.scale }) as i32;
+                let ph = (hh as f32 * if o.contains_key("fill_h") || (has("top") && has("bottom")) { 1.0 } else { self.scale }) as i32;
+                x = if has("left") { ml } else if has("right") { sw - pw - mr } else { (sw - pw) / 2 };
+                y = if has("top") { mt } else if has("bottom") { sh - ph - mb } else { (sh - ph) / 2 };
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            let xid = match self.conn.generate_id() {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+            let (pw, ph) = if kind == "layer" {
+                let pw = if has("left") && has("right") || o.contains_key("fill_w") { ww } else { (ww as f32 * self.scale) as u32 };
+                let ph = if has("top") && has("bottom") || o.contains_key("fill_h") { hh } else { (hh as f32 * self.scale) as u32 };
+                (pw, ph)
+            } else {
+                ((ww as f32 * self.scale) as u32, (hh as f32 * self.scale) as u32)
+            };
+            let aux = CreateWindowAux::new().background_pixel(0).event_mask(
+                EventMask::EXPOSURE
+                    | EventMask::STRUCTURE_NOTIFY
+                    | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE
+                    | EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
+                    | EventMask::ENTER_WINDOW
+                    | EventMask::LEAVE_WINDOW
+                    | EventMask::FOCUS_CHANGE
+                    | EventMask::PROPERTY_CHANGE,
+            );
+            if self.conn.create_window(COPY_DEPTH_FROM_PARENT, xid, self.root, x as i16, y as i16, pw.max(1) as u16, ph.max(1) as u16, 0, WindowClass::INPUT_OUTPUT, 0, &aux).is_err() {
+                return -1;
+            }
+            let _ = self.conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes());
+            let _ = self.conn.change_property8(PropMode::REPLACE, xid, self.a("_NET_WM_NAME"), self.a("UTF8_STRING"), title.as_bytes());
+            let cls = format!("{}\0{}\0", o.get("app_id").cloned().unwrap_or_else(|| "gui".to_string()), "Gui");
+            let _ = self.conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_CLASS, AtomEnum::STRING, cls.as_bytes());
+            let _ = self.conn.change_property32(PropMode::REPLACE, xid, self.a("WM_PROTOCOLS"), AtomEnum::ATOM, &[self.a("WM_DELETE_WINDOW")]);
+            let wtype = match kind {
+                "layer" => {
+                    let l = o.get("layer").map(|s| s.as_str()).unwrap_or("top");
+                    if l == "background" { "_NET_WM_WINDOW_TYPE_DESKTOP" } else if l == "overlay" { "_NET_WM_WINDOW_TYPE_NOTIFICATION" } else { "_NET_WM_WINDOW_TYPE_DOCK" }
+                }
+                "popup" => "_NET_WM_WINDOW_TYPE_POPUP_MENU",
+                "dialog" => "_NET_WM_WINDOW_TYPE_DIALOG",
+                _ => "_NET_WM_WINDOW_TYPE_NORMAL",
+            };
+            let _ = self.conn.change_property32(PropMode::REPLACE, xid, self.a("_NET_WM_WINDOW_TYPE"), AtomEnum::ATOM, &[self.a(wtype)]);
+            if kind == "layer" {
+                let ex: i32 = o.get("exclusive").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if ex > 0 {
+                    let exp = (ex as f32 * self.scale) as u32;
+                    let mut s = [0u32; 12];
+                    if has("top") {
+                        s[2] = exp + y as u32;
+                        s[8] = x as u32;
+                        s[9] = x as u32 + pw - 1;
+                    } else if has("bottom") {
+                        s[3] = exp;
+                        s[10] = x as u32;
+                        s[11] = x as u32 + pw - 1;
+                    } else if has("left") {
+                        s[0] = exp;
+                        s[4] = y as u32;
+                        s[5] = y as u32 + ph - 1;
+                    } else if has("right") {
+                        s[1] = exp;
+                        s[6] = y as u32;
+                        s[7] = y as u32 + ph - 1;
+                    }
+                    let _ = self.conn.change_property32(PropMode::REPLACE, xid, self.a("_NET_WM_STRUT_PARTIAL"), AtomEnum::CARDINAL, &s);
+                }
+                let l = o.get("layer").map(|s| s.as_str()).unwrap_or("top");
+                let st: Vec<u32> = match l {
+                    "background" => vec![self.a("_NET_WM_STATE_BELOW"), self.a("_NET_WM_STATE_STICKY"), self.a("_NET_WM_STATE_SKIP_TASKBAR")],
+                    _ => vec![self.a("_NET_WM_STATE_ABOVE"), self.a("_NET_WM_STATE_STICKY"), self.a("_NET_WM_STATE_SKIP_TASKBAR")],
+                };
+                let _ = self.conn.change_property32(PropMode::REPLACE, xid, self.a("_NET_WM_STATE"), AtomEnum::ATOM, &st);
+                let hints: [u32; 5] = [0b1100000011, x as u32, y as u32, pw, ph];
+                let _ = self.conn.change_property32(PropMode::REPLACE, xid, AtomEnum::WM_NORMAL_HINTS, AtomEnum::WM_SIZE_HINTS, &hints);
+            }
+            if o.contains_key("fullscreen") {
+                let _ = self.conn.change_property32(PropMode::REPLACE, xid, self.a("_NET_WM_STATE"), AtomEnum::ATOM, &[self.a("_NET_WM_STATE_FULLSCREEN")]);
+            }
+            let _ = self.conn.map_window(xid);
+            let _ = self.conn.flush();
+            let lw = ((pw as f32) / self.scale).round() as u32;
+            let lh = ((ph as f32) / self.scale).round() as u32;
+            self.wins.insert(id, XWin { id, xid, kind: kind.to_string(), w: lw.max(1), h: lh.max(1), buf: Vec::new(), mapped: false, focused: false });
+            self.by_xid.insert(xid, id);
+            self.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw.max(1), lh.max(1), self.scale));
+            self.events.push(format!("ready\t{}", id));
+            id as i64
+        }
+
+        pub fn draw(&mut self, id: u32, ops: &Vec<f64>, strs: &Vec<String>) {
+            let scale = self.scale;
+            let (xid, w, h) = match self.wins.get(&id) {
+                Some(w) => (w.xid, w.w, w.h),
+                None => return,
+            };
+            let (pw, ph) = (((w as f32) * scale).round().max(1.0) as u32, ((h as f32) * scale).round().max(1.0) as u32);
+            let win = self.wins.get_mut(&id).unwrap();
+            let need = (pw * ph * 4) as usize;
+            if win.buf.len() != need {
+                win.buf = vec![0u8; need];
+            }
+            paint::run_ops(&mut win.buf, pw, ph, scale, ops, strs);
+            let max_req = x11rb::connection::RequestConnection::maximum_request_bytes(&self.conn).saturating_sub(64);
+            let rows_per = ((max_req / (pw as usize * 4)).max(1)).min(ph as usize);
+            let mut y = 0usize;
+            while y < ph as usize {
+                let rows = rows_per.min(ph as usize - y);
+                let start = y * pw as usize * 4;
+                let end = (y + rows) * pw as usize * 4;
+                let _ = self.conn.put_image(ImageFormat::Z_PIXMAP, xid, self.gc, pw as u16, rows as u16, 0, y as i16, 0, 24, &win.buf[start..end]);
+                y += rows;
+            }
+            let _ = self.conn.flush();
+            self.events.push(format!("frame\t{}", id));
+        }
+
+        pub fn set_title(&mut self, id: u32, title: &str) {
+            if let Some(w) = self.wins.get(&id) {
+                let _ = self.conn.change_property8(PropMode::REPLACE, w.xid, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes());
+                let _ = self.conn.change_property8(PropMode::REPLACE, w.xid, self.a("_NET_WM_NAME"), self.a("UTF8_STRING"), title.as_bytes());
+                let _ = self.conn.flush();
+            }
+        }
+
+        pub fn set_cursor(&mut self, name: &str) {
+            let glyph: u16 = match name {
+                "pointer" | "hand" => 60,
+                "text" => 152,
+                "wait" | "progress" => 150,
+                "crosshair" => 34,
+                "move" | "grab" | "grabbing" => 52,
+                "ew-resize" => 108,
+                "ns-resize" => 116,
+                "not-allowed" => 0,
+                "help" => 92,
+                _ => 68,
+            };
+            let cur = if let Some(c) = self.cursors.get(name) {
+                *c
+            } else {
+                let c = match self.conn.generate_id() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let _ = self.conn.create_glyph_cursor(c, self.cursor_font, self.cursor_font, glyph, glyph + 1, 0, 0, 0, 0xffff, 0xffff, 0xffff);
+                self.cursors.insert(name.to_string(), c);
+                c
+            };
+            let ids: Vec<(u32, u32)> = self.wins.values().map(|w| (w.xid, w.id)).collect();
+            for (xid, _) in ids {
+                let _ = self.conn.change_window_attributes(xid, &ChangeWindowAttributesAux::new().cursor(cur));
+            }
+            let _ = self.conn.flush();
+        }
+
+        pub fn close_window(&mut self, id: u32) {
+            if let Some(w) = self.wins.remove(&id) {
+                self.by_xid.remove(&w.xid);
+                let _ = self.conn.destroy_window(w.xid);
+                let _ = self.conn.flush();
+            }
+        }
+
+        pub fn clip_set(&mut self, text: &str) {
+            self.clip_out = text.to_string();
+            if let Some(w) = self.wins.values().next() {
+                let _ = self.conn.set_selection_owner(w.xid, self.a("CLIPBOARD"), x11rb::CURRENT_TIME);
+                self.clip_owner = w.xid;
+                let _ = self.conn.flush();
+            }
+        }
+
+        pub fn clip_get(&mut self) -> String {
+            let xid = match self.wins.values().next() {
+                Some(w) => w.xid,
+                None => return String::new(),
+            };
+            if let Ok(o) = self.conn.get_selection_owner(self.a("CLIPBOARD")).map_err(|e| e.to_string()).and_then(|c| c.reply().map_err(|e| e.to_string())) {
+                if o.owner == self.clip_owner && self.clip_owner != 0 {
+                    return self.clip_out.clone();
+                }
+            }
+            self.clip_in = None;
+            let _ = self.conn.convert_selection(xid, self.a("CLIPBOARD"), self.a("UTF8_STRING"), self.a("GUI_CLIP"), x11rb::CURRENT_TIME);
+            let _ = self.conn.flush();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(500) {
+                if let Ok(Some(ev)) = self.conn.poll_for_event() {
+                    self.handle_event(ev);
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if self.clip_in.is_some() {
+                    break;
+                }
+            }
+            self.clip_in.take().unwrap_or_default()
+        }
+
+        fn key_info(&self, code: u8, state: u16) -> (String, String, u32) {
+            let shift = state & 1 != 0;
+            let lock = state & 2 != 0;
+            let altgr = state & 0x80 != 0;
+            let base = (code.saturating_sub(self.min_kc)) as usize * self.per;
+            let get = |i: usize| -> u32 { if base + i < self.keymap.len() && i < self.per { self.keymap[base + i] } else { 0 } };
+            let mut sym = if altgr && self.per > 4 {
+                if shift { get(5) } else { get(4) }
+            } else if shift {
+                get(1)
+            } else {
+                get(0)
+            };
+            if sym == 0 {
+                sym = get(0);
+            }
+            if lock && !shift {
+                if let Some(c) = keysym_char(sym) {
+                    if c.is_lowercase() {
+                        let up: String = c.to_uppercase().collect();
+                        if let Some(u) = up.chars().next() {
+                            sym = if (u as u32) < 0x100 { u as u32 } else { 0x01000000 | u as u32 };
+                        }
+                    }
+                }
+            }
+            let mut mods = 0u32;
+            if shift {
+                mods |= 1;
+            }
+            if state & 4 != 0 {
+                mods |= 2;
+            }
+            if state & 8 != 0 {
+                mods |= 4;
+            }
+            if state & 0x40 != 0 {
+                mods |= 8;
+            }
+            if lock {
+                mods |= 16;
+            }
+            if let Some(n) = keysym_name(sym) {
+                let text = match n {
+                    "Space" => " ".to_string(),
+                    "Enter" => "\n".to_string(),
+                    "Tab" => "\t".to_string(),
+                    _ => String::new(),
+                };
+                return (n.to_string(), text, mods);
+            }
+            if (0xffbe..=0xffc9).contains(&sym) {
+                return (format!("F{}", sym - 0xffbd), String::new(), mods);
+            }
+            if let Some(c) = keysym_char(sym) {
+                let t = if mods & 2 != 0 || mods & 4 != 0 { String::new() } else { c.to_string() };
+                return (c.to_string(), t, mods);
+            }
+            (String::new(), String::new(), mods)
+        }
+
+        fn handle_event(&mut self, ev: Event) {
+            match ev {
+                Event::Expose(e) => {
+                    if e.count == 0 {
+                        if let Some(id) = self.by_xid.get(&e.window).copied() {
+                            let (w, h) = {
+                                let w = &self.wins[&id];
+                                (w.w, w.h)
+                            };
+                            self.events.push(format!("expose\t{}\t{}\t{}", id, w, h));
+                        }
+                    }
+                }
+                Event::ConfigureNotify(e) => {
+                    if let Some(id) = self.by_xid.get(&e.window).copied() {
+                        let lw = ((e.width as f32) / self.scale).round().max(1.0) as u32;
+                        let lh = ((e.height as f32) / self.scale).round().max(1.0) as u32;
+                        let w = self.wins.get_mut(&id).unwrap();
+                        if w.w != lw || w.h != lh {
+                            w.w = lw;
+                            w.h = lh;
+                            self.events.push(format!("resize\t{}\t{}\t{}\t{}", id, lw, lh, self.scale));
+                        }
+                    }
+                }
+                Event::ClientMessage(e) => {
+                    if e.format == 32 && e.data.as_data32()[0] == self.a("WM_DELETE_WINDOW") {
+                        if let Some(id) = self.by_xid.get(&e.window).copied() {
+                            self.events.push(format!("close\t{}", id));
+                        }
+                    }
+                }
+                Event::ButtonPress(e) | Event::ButtonRelease(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        let down = e.response_type & 0x7f == 4;
+                        let x = e.event_x as f64 / self.scale as f64;
+                        let y = e.event_y as f64 / self.scale as f64;
+                        match e.detail {
+                            1 | 2 | 3 => {
+                                let b = match e.detail {
+                                    1 => 0,
+                                    2 => 1,
+                                    _ => 2,
+                                };
+                                self.events.push(format!("ptr_{}\t{}\t{}\t{:.2}\t{:.2}", if down { "down" } else { "up" }, id, b, x, y));
+                            }
+                            4 | 5 | 6 | 7 if down => {
+                                let (dx, dy) = match e.detail {
+                                    4 => (0.0, -15.0),
+                                    5 => (0.0, 15.0),
+                                    6 => (-15.0, 0.0),
+                                    _ => (15.0, 0.0),
+                                };
+                                self.events.push(format!("scroll\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}", id, dx, dy, x, y));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Event::MotionNotify(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        let x = e.event_x as f64 / self.scale as f64;
+                        let y = e.event_y as f64 / self.scale as f64;
+                        if let Some(last) = self.events.last() {
+                            if last.starts_with("ptr_move\t") {
+                                self.events.pop();
+                            }
+                        }
+                        self.events.push(format!("ptr_move\t{}\t{:.2}\t{:.2}", id, x, y));
+                    }
+                }
+                Event::EnterNotify(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        self.events.push(format!("ptr_move\t{}\t{:.2}\t{:.2}", id, e.event_x as f64 / self.scale as f64, e.event_y as f64 / self.scale as f64));
+                    }
+                }
+                Event::LeaveNotify(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        self.events.push(format!("ptr_leave\t{}", id));
+                    }
+                }
+                Event::FocusIn(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        self.events.push(format!("focus\t{}\t1", id));
+                    }
+                }
+                Event::FocusOut(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        self.events.push(format!("focus\t{}\t0", id));
+                    }
+                }
+                Event::KeyPress(e) | Event::KeyRelease(e) => {
+                    if let Some(id) = self.by_xid.get(&e.event).copied() {
+                        let down = e.response_type & 0x7f == 2;
+                        let (name, text, mods) = self.key_info(e.detail, u16::from(e.state));
+                        if !name.is_empty() {
+                            self.events.push(format!("key\t{}\t{}\t0\t{}\t{}\t{}", id, if down { 1 } else { 0 }, name, if down { text.replace('\t', "\\t").replace('\n', "\\n") } else { String::new() }, mods));
+                        }
+                    }
+                }
+                Event::SelectionRequest(e) => {
+                    let mut prop = e.property;
+                    if e.target == self.a("TARGETS") {
+                        let _ = self.conn.change_property32(PropMode::REPLACE, e.requestor, e.property, AtomEnum::ATOM, &[self.a("TARGETS"), self.a("UTF8_STRING"), u32::from(AtomEnum::STRING)]);
+                    } else if e.target == self.a("UTF8_STRING") || e.target == u32::from(AtomEnum::STRING) {
+                        let _ = self.conn.change_property8(PropMode::REPLACE, e.requestor, e.property, e.target, self.clip_out.as_bytes());
+                    } else {
+                        prop = 0;
+                    }
+                    let notify = SelectionNotifyEvent { response_type: SELECTION_NOTIFY_EVENT, sequence: 0, time: e.time, requestor: e.requestor, selection: e.selection, target: e.target, property: prop };
+                    let _ = self.conn.send_event(false, e.requestor, EventMask::NO_EVENT, notify);
+                    let _ = self.conn.flush();
+                }
+                Event::SelectionNotify(e) => {
+                    if e.property != 0 {
+                        if let Ok(r) = self.conn.get_property(true, e.requestor, e.property, AtomEnum::ANY, 0, 1 << 20).map_err(|x| x.to_string()).and_then(|c| c.reply().map_err(|x| x.to_string())) {
+                            self.clip_in = Some(String::from_utf8_lossy(&r.value).to_string());
+                        }
+                    } else {
+                        self.clip_in = Some(String::new());
+                    }
+                }
+                Event::MappingNotify(_) => {
+                    let setup = self.conn.setup();
+                    let (kmin, kmax) = (setup.min_keycode, setup.max_keycode);
+                    if let Ok(r) = self.conn.get_keyboard_mapping(kmin, kmax - kmin + 1).map_err(|e| e.to_string()).and_then(|c| c.reply().map_err(|e| e.to_string())) {
+                        self.keymap = r.keysyms;
+                        self.per = r.keysyms_per_keycode as usize;
+                    }
+                }
+                Event::SelectionClear(_) => {
+                    self.clip_owner = 0;
+                }
+                _ => {}
+            }
+        }
+
+        pub fn poll(&mut self, timeout_ms: i64) -> Vec<String> {
+            while let Ok(Some(ev)) = self.conn.poll_for_event() {
+                self.handle_event(ev);
+            }
+            if self.events.is_empty() && timeout_ms != 0 {
+                let fd = self.conn.stream().as_fd();
+                let mut pfd = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+                let _ = rustix::event::poll(&mut pfd, timeout_ms as i32);
+                while let Ok(Some(ev)) = self.conn.poll_for_event() {
+                    self.handle_event(ev);
+                }
+            }
+            std::mem::take(&mut self.events)
+        }
+    }
+
+}
+
+pub mod plat {
+    use super::paint;
+    use super::wl::Wl;
+    use super::x11::X11;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    pub struct HeadWin {
+        pub w: u32,
+        pub h: u32,
+        pub buf: Vec<u8>,
+    }
+
+    pub struct Head {
+        pub wins: HashMap<u32, HeadWin>,
+        pub next_id: u32,
+        pub events: Vec<String>,
+        pub clip: String,
+        pub scale: f32,
+    }
+
+    pub enum Backend {
+        Wl(Box<Wl>),
+        X(Box<X11>),
+        Head(Head),
+    }
+
+    thread_local! {
+        pub static PLAT: RefCell<Option<Backend>> = RefCell::new(None);
+    }
+
+    pub fn gui_fonts_init(regular_b64: String, semibold_b64: String, icons: String) -> i64 {
+        let a = paint::add_face(paint::b64_decode(&regular_b64));
+        let b = paint::add_face(paint::b64_decode(&semibold_b64));
+        paint::add_icons(&icons);
+        for p in [
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ] {
+            if let Ok(d) = std::fs::read(p) {
+                paint::add_face(d);
+                break;
+            }
+        }
+        (a + b) as i64
+    }
+
+    pub fn gui_init(prefer: String) -> String {
+        let want = prefer.as_str();
+        let has_wl = std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("WAYLAND_SOCKET").is_ok();
+        let has_x = std::env::var("DISPLAY").is_ok();
+        let mut err = String::new();
+        if want == "headless" || (want == "auto" && !has_wl && !has_x) {
+            PLAT.with(|p| *p.borrow_mut() = Some(Backend::Head(Head { wins: HashMap::new(), next_id: 1, events: Vec::new(), clip: String::new(), scale: 1.0 })));
+            return "headless".to_string();
+        }
+        if (want == "auto" || want == "wayland") && has_wl {
+            match Wl::connect() {
+                Ok(w) => {
+                    PLAT.with(|p| *p.borrow_mut() = Some(Backend::Wl(Box::new(w))));
+                    return "wayland".to_string();
+                }
+                Err(e) => err = format!("wayland: {}", e),
+            }
+        }
+        if (want == "auto" || want == "x11") && has_x {
+            match X11::connect() {
+                Ok(x) => {
+                    PLAT.with(|p| *p.borrow_mut() = Some(Backend::X(Box::new(x))));
+                    return "x11".to_string();
+                }
+                Err(e) => err = format!("{} x11: {}", err, e),
+            }
+        }
+        format!("error: brak dzialajacego backendu ({})", err)
+    }
+
+    pub fn gui_backend_name() -> String {
+        PLAT.with(|p| match &*p.borrow() {
+            Some(Backend::Wl(_)) => "wayland",
+            Some(Backend::X(_)) => "x11",
+            Some(Backend::Head(_)) => "headless",
+            None => "none",
+        })
+        .to_string()
+    }
+
+    pub fn gui_globals() -> String {
+        PLAT.with(|p| match &*p.borrow() {
+            Some(Backend::Wl(w)) => w.st.globals.join(","),
+            _ => String::new(),
+        })
+    }
+
+    pub fn gui_win_create(kind: String, title: String, w: i64, h: i64, opts: String) -> i64 {
+        PLAT.with(|p| match &mut *p.borrow_mut() {
+            Some(Backend::Wl(b)) => b.create_window(&kind, &title, w.max(1) as u32, h.max(0) as u32, &opts),
+            Some(Backend::X(b)) => b.create_window(&kind, &title, w.max(1) as u32, h.max(1) as u32, &opts),
+            Some(Backend::Head(hd)) => {
+                let id = hd.next_id;
+                hd.next_id += 1;
+                let (pw, ph) = ((w.max(1) as f32 * hd.scale) as u32, (h.max(1) as f32 * hd.scale) as u32);
+                hd.wins.insert(id, HeadWin { w: w.max(1) as u32, h: h.max(1) as u32, buf: vec![0u8; (pw * ph * 4) as usize] });
+                hd.events.push(format!("resize\t{}\t{}\t{}\t{}", id, w.max(1), h.max(1), hd.scale));
+                hd.events.push(format!("ready\t{}", id));
+                id as i64
+            }
+            None => -1,
+        })
+    }
+
+    pub fn gui_win_draw(id: i64, ops: Vec<f64>, strs: Vec<String>) -> i64 {
+        PLAT.with(|p| {
+            match &mut *p.borrow_mut() {
+                Some(Backend::Wl(b)) => {
+                    return if b.draw(id as u32, &ops, &strs) { 0 } else { 1 };
+                }
+                Some(Backend::X(b)) => b.draw(id as u32, &ops, &strs),
+                Some(Backend::Head(hd)) => {
+                    let sc = hd.scale;
+                    if let Some(w) = hd.wins.get_mut(&(id as u32)) {
+                        let (pw, ph) = ((w.w as f32 * sc) as u32, (w.h as f32 * sc) as u32);
+                        paint::run_ops(&mut w.buf, pw, ph, sc, &ops, &strs);
+                    }
+                    hd.events.push(format!("frame\t{}", id));
+                }
+                None => {}
+            }
+            0
+        })
+    }
+
+    pub fn gui_poll(timeout_ms: i64) -> Vec<String> {
+        PLAT.with(|p| match &mut *p.borrow_mut() {
+            Some(Backend::Wl(b)) => b.poll(timeout_ms),
+            Some(Backend::X(b)) => b.poll(timeout_ms),
+            Some(Backend::Head(hd)) => {
+                if hd.events.is_empty() && timeout_ms != 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                std::mem::take(&mut hd.events)
+            }
+            None => Vec::new(),
+        })
+    }
+
+    pub fn gui_inject(ev: String) -> i64 {
+        PLAT.with(|p| {
+            if let Some(Backend::Head(hd)) = &mut *p.borrow_mut() {
+                hd.events.push(ev.clone());
+            }
+            0
+        })
+    }
+
+    pub fn gui_win_title(id: i64, title: String) -> i64 {
+        PLAT.with(|p| {
+            match &mut *p.borrow_mut() {
+                Some(Backend::Wl(b)) => b.set_title(id as u32, &title),
+                Some(Backend::X(b)) => b.set_title(id as u32, &title),
+                _ => {}
+            }
+            0
+        })
+    }
+
+    pub fn gui_cursor(name: String) -> i64 {
+        PLAT.with(|p| {
+            match &mut *p.borrow_mut() {
+                Some(Backend::Wl(b)) => b.set_cursor(&name),
+                Some(Backend::X(b)) => b.set_cursor(&name),
+                _ => {}
+            }
+            0
+        })
+    }
+
+    pub fn gui_win_close(id: i64) -> i64 {
+        PLAT.with(|p| {
+            match &mut *p.borrow_mut() {
+                Some(Backend::Wl(b)) => b.close_window(id as u32),
+                Some(Backend::X(b)) => b.close_window(id as u32),
+                Some(Backend::Head(hd)) => {
+                    hd.wins.remove(&(id as u32));
+                }
+                None => {}
+            }
+            0
+        })
+    }
+
+    pub fn gui_win_resize(id: i64, w: i64, h: i64) -> i64 {
+        PLAT.with(|p| {
+            match &mut *p.borrow_mut() {
+                Some(Backend::Wl(b)) => b.resize_layer(id as u32, w.max(0) as u32, h.max(0) as u32),
+                Some(Backend::Head(hd)) => {
+                    let sc = hd.scale;
+                    if let Some(win) = hd.wins.get_mut(&(id as u32)) {
+                        win.w = w.max(1) as u32;
+                        win.h = h.max(1) as u32;
+                        win.buf = vec![0u8; ((win.w as f32 * sc) as u32 * (win.h as f32 * sc) as u32 * 4) as usize];
+                    }
+                    hd.events.push(format!("resize\t{}\t{}\t{}\t{}", id, w, h, sc));
+                }
+                _ => {}
+            }
+            0
+        })
+    }
+
+    pub fn gui_clip_set(text: String) -> i64 {
+        PLAT.with(|p| {
+            match &mut *p.borrow_mut() {
+                Some(Backend::Wl(b)) => b.clip_set(&text),
+                Some(Backend::X(b)) => b.clip_set(&text),
+                Some(Backend::Head(hd)) => hd.clip = text.clone(),
+                None => {}
+            }
+            0
+        })
+    }
+
+    pub fn gui_clip_get() -> String {
+        PLAT.with(|p| match &mut *p.borrow_mut() {
+            Some(Backend::Wl(b)) => b.clip_get(),
+            Some(Backend::X(b)) => b.clip_get(),
+            Some(Backend::Head(hd)) => hd.clip.clone(),
+            None => String::new(),
+        })
+    }
+
+    pub fn gui_session_lock(on: i64) -> i64 {
+        PLAT.with(|p| match &mut *p.borrow_mut() {
+            Some(Backend::Wl(b)) => {
+                if on != 0 {
+                    b.lock_session() as i64
+                } else {
+                    b.unlock_session();
+                    1
+                }
+            }
+            _ => 0,
+        })
+    }
+
+    pub fn gui_idle_watch(ms: i64) -> i64 {
+        PLAT.with(|p| {
+            if let Some(Backend::Wl(b)) = &mut *p.borrow_mut() {
+                b.idle_watch(ms.max(1) as u32);
+            }
+            0
+        })
+    }
+
+    pub fn gui_inhibit_idle(id: i64, on: i64) -> i64 {
+        PLAT.with(|p| {
+            if let Some(Backend::Wl(b)) = &mut *p.borrow_mut() {
+                b.inhibit_idle(id as u32, on != 0);
+            }
+            0
+        })
+    }
+
+    pub fn gui_toplevel_action(handle: i64, action: String) -> i64 {
+        PLAT.with(|p| {
+            if let Some(Backend::Wl(b)) = &mut *p.borrow_mut() {
+                b.toplevel_action(handle as u32, &action);
+            }
+            0
+        })
+    }
+
+    pub fn gui_text_measure(text: String, size: f64, weight: i64, ls: f64) -> f64 {
+        paint::measure_text(&text, size as f32, weight, ls as f32) as f64
+    }
+
+    pub fn gui_text_wrap(text: String, size: f64, weight: i64, max_w: f64, ls: f64) -> Vec<String> {
+        paint::wrap_text(&text, size as f32, weight, max_w as f32, ls as f32)
+    }
+
+    pub fn gui_font_ascent(size: f64, weight: i64) -> f64 {
+        paint::font_metrics(size as f32, weight).0 as f64
+    }
+
+    pub fn gui_font_descent(size: f64, weight: i64) -> f64 {
+        paint::font_metrics(size as f32, weight).1 as f64
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut c: u32 = 0xffffffff;
+        for b in data {
+            c ^= *b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { (c >> 1) ^ 0xedb88320 } else { c >> 1 };
+            }
+        }
+        !c
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for d in data {
+            a = (a + *d as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    }
+
+    pub fn encode_png(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let mut raw: Vec<u8> = Vec::with_capacity((w * h * 4 + h) as usize);
+        for y in 0..h as usize {
+            raw.push(0);
+            for x in 0..w as usize {
+                let i = (y * w as usize + x) * 4;
+                let a = bgra[i + 3] as u32;
+                let un = |v: u8| -> u8 { if a == 0 { 0 } else { ((v as u32 * 255 / a).min(255)) as u8 } };
+                raw.push(un(bgra[i + 2]));
+                raw.push(un(bgra[i + 1]));
+                raw.push(un(bgra[i]));
+                raw.push(bgra[i + 3]);
+            }
+        }
+        let mut z: Vec<u8> = vec![0x78, 0x01];
+        let mut pos = 0;
+        while pos < raw.len() {
+            let n = (raw.len() - pos).min(65535);
+            let last = if pos + n >= raw.len() { 1 } else { 0 };
+            z.push(last);
+            z.extend_from_slice(&(n as u16).to_le_bytes());
+            z.extend_from_slice(&(!(n as u16)).to_le_bytes());
+            z.extend_from_slice(&raw[pos..pos + n]);
+            pos += n;
+        }
+        z.extend_from_slice(&adler32(&raw).to_be_bytes());
+        let mut out: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ihdr: Vec<u8> = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png_chunk(&mut out, b"IHDR", &ihdr);
+        png_chunk(&mut out, b"IDAT", &z);
+        png_chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    pub fn gui_screenshot(id: i64, path: String) -> i64 {
+        PLAT.with(|p| {
+            let (buf, w, h): (Vec<u8>, u32, u32) = match &*p.borrow() {
+                Some(Backend::Head(hd)) => match hd.wins.get(&(id as u32)) {
+                    Some(w) => (w.buf.clone(), (w.w as f32 * hd.scale) as u32, (w.h as f32 * hd.scale) as u32),
+                    None => return -1,
+                },
+                Some(Backend::X(x)) => match x.wins.get(&(id as u32)) {
+                    Some(w) => (w.buf.clone(), (w.w as f32 * x.scale) as u32, (w.h as f32 * x.scale) as u32),
+                    None => return -1,
+                },
+                _ => return -1,
+            };
+            if buf.is_empty() {
+                return -1;
+            }
+            let png = encode_png(&buf, w, h);
+            if std::fs::write(path, png).is_ok() { 0 } else { -1 }
+        })
+    }
+
+    pub fn gui_set_scale(s: f64) -> i64 {
+        PLAT.with(|p| {
+            if let Some(Backend::Head(hd)) = &mut *p.borrow_mut() {
+                hd.scale = s as f32;
+            }
+            0
+        })
+    }
+
+    thread_local! {
+        pub static T0: std::time::Instant = std::time::Instant::now();
+    }
+
+    pub fn gui_now_ms() -> i64 {
+        T0.with(|t| t.elapsed().as_millis() as i64)
+    }
+
+    pub fn gui_env(name: String) -> String {
+        std::env::var(name.as_str()).unwrap_or_default()
+    }
+
+    pub fn gui_str_len(s: String) -> i64 {
+        s.chars().count() as i64
+    }
+
+    pub fn gui_run(cmd: String, args: Vec<String>) -> String {
+        match std::process::Command::new(&cmd).args(&args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+            Err(_) => String::new(),
+        }
+    }
+
+    pub fn gui_spawn(cmd: String, args: Vec<String>) -> i64 {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new(&cmd);
+        c.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        unsafe {
+            c.pre_exec(|| {
+                let _ = rustix::process::setsid();
+                Ok(())
+            });
+        }
+        match c.spawn() {
+            Ok(ch) => ch.id() as i64,
+            Err(_) => -1,
+        }
+    }
+
+    pub fn gui_read_file(path: String) -> String {
+        std::fs::read_to_string(&path).unwrap_or_default()
+    }
+
+    pub fn gui_write_file(path: String, data: String) -> i64 {
+        if std::fs::write(&path, data).is_ok() { 0 } else { -1 }
+    }
+
+    pub fn gui_list_apps() -> Vec<String> {
+        let mut dirs: Vec<String> = vec!["/usr/share/applications".to_string(), "/usr/local/share/applications".to_string()];
+        if let Ok(h) = std::env::var("HOME") {
+            dirs.push(format!("{}/.local/share/applications", h));
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
+        for d in dirs {
+            let rd = match std::fs::read_dir(&d) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                    continue;
+                }
+                let txt = match std::fs::read_to_string(&p) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let (mut name, mut exec, mut icon, mut comment) = (String::new(), String::new(), String::new(), String::new());
+                let mut hidden = false;
+                let mut in_entry = false;
+                for line in txt.lines() {
+                    let l = line.trim();
+                    if l.as_bytes().first() == Some(&0x5b) {
+                        in_entry = l == "[Desktop Entry]";
+                        continue;
+                    }
+                    if !in_entry {
+                        continue;
+                    }
+                    if let Some(v) = l.strip_prefix("Name=") {
+                        if name.is_empty() {
+                            name = v.to_string();
+                        }
+                    } else if let Some(v) = l.strip_prefix("Exec=") {
+                        if exec.is_empty() {
+                            exec = v.to_string();
+                        }
+                    } else if let Some(v) = l.strip_prefix("Icon=") {
+                        icon = v.to_string();
+                    } else if let Some(v) = l.strip_prefix("Comment=") {
+                        if comment.is_empty() {
+                            comment = v.to_string();
+                        }
+                    } else if l == "NoDisplay=true" || l == "Hidden=true" {
+                        hidden = true;
+                    }
+                }
+                if hidden || name.is_empty() || exec.is_empty() {
+                    continue;
+                }
+                let mut clean = String::new();
+                let mut it = exec.chars().peekable();
+                while let Some(c) = it.next() {
+                    if c == '%' {
+                        it.next();
+                    } else {
+                        clean.push(c);
+                    }
+                }
+                out.push((name.to_lowercase(), format!("{}\t{}\t{}\t{}", name, clean.trim(), icon, comment)));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out.into_iter().map(|x| x.1).collect()
+    }
+
+    pub fn gui_lower(s: String) -> String {
+        s.to_lowercase()
+    }
+
+    pub fn gui_exit(code: i64) -> i64 {
+        std::process::exit(code as i32)
+    }
+
+    pub fn gui_file_size(path: String) -> i64 {
+        match std::fs::metadata(&path) {
+            Ok(m) => m.len() as i64,
+            Err(_) => -1,
+        }
+    }
+
+}
+
+pub use plat::*;
+]
