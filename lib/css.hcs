@@ -1,0 +1,495 @@
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::element>
+
+struct Rule [
+    kind: Str,
+    class: Str,
+    id: Str,
+    pseudo: Str,
+    st: Style,
+    spec: Int
+]
+
+struct Sheet [
+    rules: List<Rule>
+]
+
+fun sheet_empty() -> Sheet [
+    let r: List<Rule> = []
+    end Sheet(r)
+]
+
+!! Czy `el` (po rozwiazaniu id) pasuje do reguly (bez pseudo-klasy)
+fun rule_matches(r: Rule, kind: Str, class: Str, id: Str) -> Bool [
+    if r.kind != "" and r.kind != "*" and r.kind != kind [
+        end false
+    ]
+    if r.class != "" [
+        let found = false
+        let parts = css_split_top(class, " ")
+        let i = 0
+        while i < parts.len() [
+            if parts[i] == r.class [
+                found = true
+            ]
+            i = i + 1
+        ]
+        if not found [
+            end false
+        ]
+    ]
+    if r.id != "" and r.id != id [
+        end false
+    ]
+    end true
+]
+
+!! Zlaczony styl z regul pasujacych do (element, pseudo); kolejnosc: rosnaca specyficznosc, potem kolejnosc w arkuszu
+fun css_apply(sh: Sheet, kind: Str, class: Str, id: Str, pseudo: Str) -> Style [
+    let out = style_unset()
+    let level = 0
+    while level < 4 [
+        let i = 0
+        while i < sh.rules.len() [
+            let r = sh.rules[i].clone()
+            if r.pseudo == pseudo and r.spec == level [
+                if rule_matches(r.clone(), kind, class, id) [
+                    out = style_merge(out, r.st.clone())
+                ]
+            ]
+            i = i + 1
+        ]
+        level = level + 1
+    ]
+    end out
+]
+
+!! ---------------------------------------------------------------- parser
+fun css_strip_comments(src: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = src.len()
+    let in_c = false
+    while i < n [
+        let c = src.char_at(i)
+        if in_c [
+            if c == "*" and i + 1 < n and src.char_at(i + 1) == "/" [
+                in_c = false
+                i = i + 1
+            ]
+        ] else [
+            if c == "/" and i + 1 < n and src.char_at(i + 1) == "*" [
+                in_c = true
+                i = i + 1
+            ] else [
+                out = out + c
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun css_trim(s: Str) -> Str [
+    let a = 0
+    let b = s.len()
+    while a < b and (s.char_at(a) == " " or s.char_at(a) == "\n" or s.char_at(a) == "\t" or s.char_at(a) == "\r") [
+        a = a + 1
+    ]
+    while b > a and (s.char_at(b - 1) == " " or s.char_at(b - 1) == "\n" or s.char_at(b - 1) == "\t" or s.char_at(b - 1) == "\r") [
+        b = b - 1
+    ]
+    end s.slice(a, b)
+]
+
+!! Rozdziel po znaku, ale nie wewnatrz nawiasow ()
+fun css_split_top(s: Str, sep: Str) -> List<Str> [
+    let out: List<Str> = []
+    let cur = ""
+    let depth = 0
+    let i = 0
+    while i < s.len() [
+        let c = s.char_at(i)
+        if c == "(" [
+            depth = depth + 1
+        ]
+        if c == ")" [
+            depth = depth - 1
+        ]
+        if c == sep and depth == 0 [
+            out.push(cur)
+            cur = ""
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    out.push(cur)
+    end out
+]
+
+fun css_words(s: Str) -> List<Str> [
+    let out: List<Str> = []
+    let parts = css_split_top(s, " ")
+    let i = 0
+    while i < parts.len() [
+        let w = css_trim(parts[i].clone())
+        if w.len() > 0 [
+            out.push(w)
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun css_num(s: Str) -> Float [
+    let t = css_trim(s)
+    if s_ends(t, "px") [
+        t = t.slice(0, t.len() - 2)
+    ]
+    if s_ends(t, "em") [
+        t = t.slice(0, t.len() - 2)
+    ]
+    let neg = false
+    let i = 0
+    if t.len() > 0 and t.char_at(0) == "-" [
+        neg = true
+        i = 1
+    ]
+    let ip = 0.0
+    let fp = 0.0
+    let scale = 0.1
+    let seen_dot = false
+    while i < t.len() [
+        let c = t.char_at(i)
+        if c == "." [
+            seen_dot = true
+        ] else [
+            let d = hex_digit(c)
+            if d < 0 or d > 9 [
+                i = t.len()
+            ] else [
+                if seen_dot [
+                    fp = fp + (d as Float) * scale
+                    scale = scale / 10.0
+                ] else [
+                    ip = ip * 10.0 + (d as Float)
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    let v = ip + fp
+    if neg [
+        end 0.0 - v
+    ]
+    end v
+]
+
+fun css_color(s: Str) -> Int [
+    let t = css_trim(s)
+    if s_starts(t, "rgb") [
+        let a = s_find(t, "(")
+        let b = s_find(t, ")")
+        if a >= 0 and b > a [
+            let inner = t.slice(a + 1, b)
+            let ps = css_split_top(inner, ",")
+            if ps.len() >= 3 [
+                let r = css_num(ps[0].clone()) as Int
+                let g = css_num(ps[1].clone()) as Int
+                let bl = css_num(ps[2].clone()) as Int
+                let al = 255
+                if ps.len() >= 4 [
+                    al = (css_num(ps[3].clone()) * 255.0) as Int
+                ]
+                end rgba(r, g, bl, al)
+            ]
+        ]
+    ]
+    end parse_color(t)
+]
+
+fun css_len(s: Str) -> Length [
+    let t = css_trim(s)
+    if t == "fill" or t == "100%" or t == "auto-fill" [
+        end fill()
+    ]
+    if t == "shrink" or t == "auto" or t == "fit-content" [
+        end shrink()
+    ]
+    end fixed(css_num(t))
+]
+
+fun css_decl(st: Style, prop: Str, val: Str) -> Style [
+    let s = st.clone()
+    let ws = css_words(val)
+    if prop == "background" or prop == "background-color" [
+        if s_starts(val, "linear-gradient") [
+            let a = s_find(val, "(")
+            let b = val.len() - 1
+            let inner = val.slice(a + 1, b)
+            let ps = css_split_top(inner, ",")
+            let angle = 180.0
+            let first = 0
+            if ps.len() >= 3 [
+                let h = css_trim(ps[0].clone())
+                if s_ends(h, "deg") [
+                    angle = css_num(h.slice(0, h.len() - 3))
+                    first = 1
+                ]
+            ]
+            if ps.len() >= first + 2 [
+                s.bg = css_color(ps[first].clone())
+                s.bg2 = css_color(ps[first + 1].clone())
+                s.angle = angle
+            ]
+        ] else [
+            s.bg = css_color(val)
+            s.bg2 = 0
+        ]
+    ]
+    if prop == "color" [
+        s.fg = css_color(val)
+    ]
+    if prop == "border-radius" [
+        s.radius = css_num(val)
+    ]
+    if prop == "border" [
+        if ws.len() >= 1 [
+            s.bw = css_num(ws[0].clone())
+        ]
+        if ws.len() >= 3 [
+            s.bc = css_color(ws[2].clone())
+        ]
+        if ws.len() == 2 [
+            s.bc = css_color(ws[1].clone())
+        ]
+    ]
+    if prop == "border-color" [
+        s.bc = css_color(val)
+    ]
+    if prop == "border-width" [
+        s.bw = css_num(val)
+    ]
+    if prop == "padding" [
+        if ws.len() == 1 [
+            let v = css_num(ws[0].clone())
+            s.pt = v
+            s.pr = v
+            s.pb = v
+            s.pl = v
+        ]
+        if ws.len() == 2 [
+            s.pt = css_num(ws[0].clone())
+            s.pb = css_num(ws[0].clone())
+            s.pr = css_num(ws[1].clone())
+            s.pl = css_num(ws[1].clone())
+        ]
+        if ws.len() == 4 [
+            s.pt = css_num(ws[0].clone())
+            s.pr = css_num(ws[1].clone())
+            s.pb = css_num(ws[2].clone())
+            s.pl = css_num(ws[3].clone())
+        ]
+    ]
+    if prop == "margin" [
+        if ws.len() == 1 [
+            let v = css_num(ws[0].clone())
+            s.mt = v
+            s.mr = v
+            s.mb = v
+            s.ml = v
+        ]
+        if ws.len() == 2 [
+            s.mt = css_num(ws[0].clone())
+            s.mb = css_num(ws[0].clone())
+            s.mr = css_num(ws[1].clone())
+            s.ml = css_num(ws[1].clone())
+        ]
+    ]
+    if prop == "gap" [
+        s.gap = css_num(val)
+    ]
+    if prop == "font-size" [
+        s.size = css_num(val)
+    ]
+    if prop == "font-weight" [
+        if val == "bold" or val == "600" or val == "700" or val == "semibold" [
+            s.weight = 1
+        ] else [
+            s.weight = 0
+        ]
+    ]
+    if prop == "width" [
+        s.w = css_len(val)
+    ]
+    if prop == "height" [
+        s.h = css_len(val)
+    ]
+    if prop == "min-width" [
+        s.min_w = css_num(val)
+    ]
+    if prop == "max-width" [
+        s.max_w = css_num(val)
+    ]
+    if prop == "min-height" [
+        s.min_h = css_num(val)
+    ]
+    if prop == "max-height" [
+        s.max_h = css_num(val)
+    ]
+    if prop == "opacity" [
+        s.opacity = css_num(val)
+    ]
+    if prop == "letter-spacing" [
+        s.ls = css_num(val)
+    ]
+    if prop == "line-height" [
+        s.line_h = css_num(val)
+    ]
+    if prop == "text-align" [
+        if val == "center" [
+            s.tx = 1
+        ]
+        if val == "right" or val == "end" [
+            s.tx = 2
+        ]
+        if val == "left" or val == "start" [
+            s.tx = 0
+        ]
+    ]
+    if prop == "overflow" [
+        if val == "hidden" or val == "clip" [
+            s.clip = 1
+        ]
+    ]
+    if prop == "backdrop-filter" [
+        let a = s_find(val, "(")
+        let b = s_find(val, ")")
+        if a >= 0 and b > a [
+            s.glass = css_num(val.slice(a + 1, b))
+        ]
+    ]
+    if prop == "box-shadow" [
+        if ws.len() >= 4 [
+            s.sh_dy = css_num(ws[1].clone())
+            s.sh_blur = css_num(ws[2].clone())
+            s.sh_color = css_color(ws[3].clone())
+        ]
+        if val == "none" [
+            s.sh_blur = 0.0
+            s.sh_color = 0
+        ]
+    ]
+    end s
+]
+
+fun css_parse_block(body: Str) -> Style [
+    let st = style_unset()
+    let decls = css_split_top(body, ";")
+    let i = 0
+    while i < decls.len() [
+        let d = css_trim(decls[i].clone())
+        let c = s_find(d, ":")
+        if c > 0 [
+            let prop = css_trim(d.slice(0, c))
+            let val = css_trim(d.slice(c + 1, d.len()))
+            st = css_decl(st, prop, val)
+        ]
+        i = i + 1
+    ]
+    end st
+]
+
+!! Jeden selektor (bez przecinkow): np. `button.primary:hover`
+fun css_parse_selector(sel: Str, st: Style) -> Rule [
+    let s = css_trim(sel)
+    let pseudo = ""
+    let pc = s_find(s, ":")
+    if pc >= 0 [
+        pseudo = s.slice(pc + 1, s.len())
+        s = s.slice(0, pc)
+    ]
+    if pseudo == "pressed" [
+        pseudo = "active"
+    ]
+    let kind = ""
+    let class = ""
+    let id = ""
+    let mode = 0
+    let cur = ""
+    let i = 0
+    while i <= s.len() [
+        let c = ""
+        if i < s.len() [
+            c = s.char_at(i)
+        ]
+        if i == s.len() or c == "." or c == "#" [
+            if mode == 0 [
+                kind = cur
+            ]
+            if mode == 1 [
+                class = cur
+            ]
+            if mode == 2 [
+                id = cur
+            ]
+            cur = ""
+            if c == "." [
+                mode = 1
+            ]
+            if c == "#" [
+                mode = 2
+            ]
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    let spec = 0
+    if kind != "" and kind != "*" [
+        spec = 0
+    ]
+    if class != "" [
+        spec = 1
+    ]
+    if id != "" [
+        spec = 2
+    ]
+    end Rule(kind, class, id, pseudo, st, spec)
+]
+
+fun css_parse(src: Str) -> Sheet [
+    let clean = css_strip_comments(src)
+    let rules: List<Rule> = []
+    let i = 0
+    let n = clean.len()
+    let cur = ""
+    while i < n [
+        let c = clean.char_at(i)
+        if c == "{" [
+            let j = i + 1
+            let body = ""
+            while j < n and clean.char_at(j) != "}" [
+                body = body + clean.char_at(j)
+                j = j + 1
+            ]
+            let st = css_parse_block(body)
+            let sels = css_split_top(cur, ",")
+            let k = 0
+            while k < sels.len() [
+                if css_trim(sels[k].clone()).len() > 0 [
+                    rules.push(css_parse_selector(sels[k].clone(), st.clone()))
+                ]
+                k = k + 1
+            ]
+            cur = ""
+            i = j
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    end Sheet(rules)
+]
