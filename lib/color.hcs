@@ -1,0 +1,145 @@
+fun rgba(r: Int, g: Int, b: Int, a: Int) -> Int [
+    end r * 16777216 + g * 65536 + b * 256 + a
+]
+
+fun rgb(r: Int, g: Int, b: Int) -> Int [
+    end r * 16777216 + g * 65536 + b * 256 + 255
+]
+
+!! hex(0x89b4fa) - kolor z liczby RRGGBB, nieprzezroczysty
+fun hex(v: Int) -> Int [
+    end v * 256 + 255
+]
+
+fun hexa(v: Int, a: Int) -> Int [
+    end v * 256 + a
+]
+
+fun col_r(c: Int) -> Int [
+    end (c / 16777216) % 256
+]
+
+fun col_g(c: Int) -> Int [
+    end (c / 65536) % 256
+]
+
+fun col_b(c: Int) -> Int [
+    end (c / 256) % 256
+]
+
+fun col_a(c: Int) -> Int [
+    end c % 256
+]
+
+fun with_alpha(c: Int, a: Int) -> Int [
+    end (c / 256) * 256 + a
+]
+
+fun scale_alpha(c: Int, k: Float) -> Int [
+    let a = (col_a(c) as Float) * k
+    if a > 255.0 [
+        a = 255.0
+    ]
+    if a < 0.0 [
+        a = 0.0
+    ]
+    end with_alpha(c, a as Int)
+]
+
+fun mix(a: Int, b: Int, t: Float) -> Int [
+    if t <= 0.0 [
+        end a
+    ]
+    if t >= 1.0 [
+        end b
+    ]
+    let r = (col_r(a) as Float) + ((col_r(b) - col_r(a)) as Float) * t
+    let g = (col_g(a) as Float) + ((col_g(b) - col_g(a)) as Float) * t
+    let bl = (col_b(a) as Float) + ((col_b(b) - col_b(a)) as Float) * t
+    let al = (col_a(a) as Float) + ((col_a(b) - col_a(a)) as Float) * t
+    end rgba(r as Int, g as Int, bl as Int, al as Int)
+]
+
+fun lighten(c: Int, amt: Float) -> Int [
+    end mix(c, rgba(255, 255, 255, col_a(c)), amt)
+]
+
+fun darken(c: Int, amt: Float) -> Int [
+    end mix(c, rgba(0, 0, 0, col_a(c)), amt)
+]
+
+fun hex_digit(ch: Str) -> Int [
+    let digits = "0123456789abcdef"
+    let i = 0
+    while i < 16 [
+        if digits.char_at(i) == ch [
+            end i
+        ]
+        i = i + 1
+    ]
+    let up = "0123456789ABCDEF"
+    i = 0
+    while i < 16 [
+        if up.char_at(i) == ch [
+            end i
+        ]
+        i = i + 1
+    ]
+    end -1
+]
+
+!! "#rgb", "#rrggbb", "#rrggbbaa" oraz kilka nazw; zle wejscie -> przezroczysty
+fun parse_color(s: Str) -> Int [
+    let t: Str = s
+    if t == "transparent" [
+        end 0
+    ]
+    if t == "white" [
+        end rgb(255, 255, 255)
+    ]
+    if t == "black" [
+        end rgb(0, 0, 0)
+    ]
+    if t == "red" [
+        end rgb(243, 139, 168)
+    ]
+    if t == "green" [
+        end rgb(166, 227, 161)
+    ]
+    if t == "blue" [
+        end rgb(137, 180, 250)
+    ]
+    if t == "yellow" [
+        end rgb(249, 226, 175)
+    ]
+    if t.len() > 0 and t.char_at(0) == "#" [
+        let h: Str = t.slice(1, t.len())
+        let n = h.len()
+        if n == 3 [
+            let r = hex_digit(h.char_at(0))
+            let g = hex_digit(h.char_at(1))
+            let b = hex_digit(h.char_at(2))
+            if r < 0 or g < 0 or b < 0 [
+                end 0
+            ]
+            end rgb(r * 17, g * 17, b * 17)
+        ]
+        if n == 6 or n == 8 [
+            let v = 0
+            let i = 0
+            while i < n [
+                let d = hex_digit(h.char_at(i))
+                if d < 0 [
+                    end 0
+                ]
+                v = v * 16 + d
+                i = i + 1
+            ]
+            if n == 6 [
+                end hex(v)
+            ]
+            end v
+        ]
+    ]
+    end 0
+]
