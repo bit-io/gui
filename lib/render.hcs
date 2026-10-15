@@ -1,0 +1,685 @@
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::theme>
+get <bit:gui::element>
+get <bit:gui::layout>
+get <bit:gui::native>
+
+!! --- lista polecen rysowania (Ops) - w tym samym pliku co render, bo kompilator liczy `&mut self` tylko w obrebie pliku
+
+struct Ops [
+    f: List<Float>,
+    s: List<Str>
+]
+
+fun ops_new() -> Ops [
+    let f: List<Float> = []
+    let s: List<Str> = []
+    end Ops(f, s)
+]
+
+impl Ops [
+    pub fun p(self, v: Float) [
+        self.f.push(v)
+    ]
+    pub fun str_idx(self, t: Str) -> Float [
+        self.s.push(t)
+        end ((self.s.len() - 1) as Float)
+    ]
+    pub fun clear_all(self, c: Int) [
+        self.f.push(15.0)
+        self.f.push(c as Float)
+    ]
+    pub fun rrect(self, x: Float, y: Float, w: Float, h: Float, r: Float, c: Int) [
+        if col_a(c) > 0 and w > 0.0 and h > 0.0 [
+            self.f.push(1.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(c as Float)
+        ]
+    ]
+    pub fun stroke(self, x: Float, y: Float, w: Float, h: Float, r: Float, bw: Float, c: Int) [
+        if col_a(c) > 0 and bw > 0.0 and w > 0.0 and h > 0.0 [
+            self.f.push(2.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(bw)
+            self.f.push(c as Float)
+        ]
+    ]
+    pub fun lgrad(self, x: Float, y: Float, w: Float, h: Float, r: Float, angle: Float, c1: Int, c2: Int) [
+        if w > 0.0 and h > 0.0 [
+            self.f.push(3.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(angle)
+            self.f.push(2.0)
+            self.f.push(0.0)
+            self.f.push(c1 as Float)
+            self.f.push(1.0)
+            self.f.push(c2 as Float)
+        ]
+    ]
+    pub fun rgrad(self, x: Float, y: Float, w: Float, h: Float, r: Float, fx: Float, fy: Float, rad: Float, c1: Int, c2: Int) [
+        if w > 0.0 and h > 0.0 [
+            self.f.push(4.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(fx)
+            self.f.push(fy)
+            self.f.push(rad)
+            self.f.push(2.0)
+            self.f.push(0.0)
+            self.f.push(c1 as Float)
+            self.f.push(1.0)
+            self.f.push(c2 as Float)
+        ]
+    ]
+    !! cien (blur, spread, dx, dy); inset = wewnetrzny
+    pub fun shadow(self, x: Float, y: Float, w: Float, h: Float, r: Float, blur: Float, spread: Float, dx: Float, dy: Float, c: Int, inset: Bool) [
+        if col_a(c) > 0 and w > 0.0 and h > 0.0 [
+            self.f.push(5.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(blur)
+            self.f.push(spread)
+            self.f.push(dx)
+            self.f.push(dy)
+            self.f.push(c as Float)
+            if inset [
+                self.f.push(1.0)
+            ] else [
+                self.f.push(0.0)
+            ]
+        ]
+    ]
+    pub fun text(self, x: Float, baseline: Float, size: Float, weight: Int, c: Int, t: Str, ls: Float) [
+        if col_a(c) > 0 and t.len() > 0 [
+            let si = self.str_idx(t)
+            self.f.push(6.0)
+            self.f.push(x)
+            self.f.push(baseline)
+            self.f.push(size)
+            self.f.push(weight as Float)
+            self.f.push(c as Float)
+            self.f.push(si)
+            self.f.push(ls)
+        ]
+    ]
+    pub fun clip(self, x: Float, y: Float, w: Float, h: Float, r: Float) [
+        self.f.push(7.0)
+        self.f.push(x)
+        self.f.push(y)
+        self.f.push(w)
+        self.f.push(h)
+        self.f.push(r)
+        self.f.push(r)
+        self.f.push(r)
+        self.f.push(r)
+    ]
+    pub fun unclip(self) [
+        self.f.push(8.0)
+    ]
+    pub fun icon(self, x: Float, y: Float, size: Float, c: Int, sw: Float, name: Str) [
+        if col_a(c) > 0 [
+            let si = self.str_idx(name)
+            self.f.push(9.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(size)
+            self.f.push(c as Float)
+            self.f.push(sw)
+            self.f.push(si)
+        ]
+    ]
+    pub fun backdrop(self, x: Float, y: Float, w: Float, h: Float, r: Float, blur: Float, tint: Int) [
+        if w > 0.0 and h > 0.0 [
+            self.f.push(10.0)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(r)
+            self.f.push(blur)
+            self.f.push(tint as Float)
+        ]
+    ]
+    pub fun layer(self, alpha: Float) [
+        self.f.push(11.0)
+        self.f.push(alpha)
+    ]
+    pub fun endlayer(self) [
+        self.f.push(12.0)
+    ]
+    pub fun line(self, x1: Float, y1: Float, x2: Float, y2: Float, w: Float, c: Int, round: Bool) [
+        if col_a(c) > 0 [
+            self.f.push(13.0)
+            self.f.push(x1)
+            self.f.push(y1)
+            self.f.push(x2)
+            self.f.push(y2)
+            self.f.push(w)
+            self.f.push(c as Float)
+            if round [
+                self.f.push(1.0)
+            ] else [
+                self.f.push(0.0)
+            ]
+        ]
+    ]
+    pub fun svg(self, x: Float, y: Float, scale: Float, fill: Int, stroke: Int, sw: Float, d: Str) [
+        let si = self.str_idx(d)
+        self.f.push(14.0)
+        self.f.push(x)
+        self.f.push(y)
+        self.f.push(scale)
+        self.f.push(fill as Float)
+        self.f.push(stroke as Float)
+        self.f.push(sw)
+        self.f.push(si)
+    ]
+]
+
+struct RCtx [
+    theme: Theme,
+    hover: Str,
+    pressed: Str,
+    focus: Str,
+    anim: Dict<Str, Float>,
+    caret: Dict<Str, Int>,
+    sel: Dict<Str, Int>,
+    open_pick: Str,
+    tip: Str,
+    caret_on: Bool,
+    mx: Float,
+    my: Float,
+    ww: Float,
+    wh: Float,
+    pick_hover: Int
+]
+
+fun av(rc: RCtx, key: Str) -> Float [
+    match rc.anim.fetch(key) [
+        Some(v) -> [
+            end v
+        ]
+        None -> [
+        ]
+    ]
+    end 0.0
+]
+
+fun mix_state(base: Int, over: Int, t: Float) -> Int [
+    if t <= 0.001 [
+        end base
+    ]
+    if col_a(base) == 0 [
+        end scale_alpha(over, t)
+    ]
+    end mix(base, over, t)
+]
+
+fun pick_row_h() -> Float [
+    end 34.0
+]
+
+fun pick_list_w(b: Box) -> Float [
+    end fmax(b.w, 170.0)
+]
+
+!! szerokosc zakladki `i` w tabs
+fun tab_w(b: Box, i: Int) -> Float [
+    end gui_text_measure(b.el.opts[i].clone(), b.el.st.size, 1, 0.0) + 28.0
+]
+
+fun tab_x(b: Box, i: Int) -> Float [
+    let x = b.x + b.el.st.pl
+    let k = 0
+    while k < i [
+        x = x + tab_w(b.clone(), k) + b.el.st.gap
+        k = k + 1
+    ]
+    end x
+]
+
+fun text_prefix_w(e: Element, t: Str, n: Int) -> Float [
+    let n2 = iclamp(n, 0, slen(t))
+    end gui_text_measure(t.slice(0, n2), e.st.size, e.st.weight, e.st.ls)
+]
+
+fun mask_text(t: Str) -> Str [
+    let out = ""
+    let i = 0
+    while i < slen(t) [
+        out = out + "•"
+        i = i + 1
+    ]
+    end out
+]
+
+fun shown_text(e: Element) -> Str [
+    if e.secret [
+        end mask_text(e.text.clone())
+    ]
+    end e.text.clone()
+]
+
+impl Ops [
+    pub fun decor(self, b: Box, rc: RCtx) [
+        let e = b.el.clone()
+        let st = e.st.clone()
+        let th = av(rc.clone(), "h:" + e.id)
+        let tp = av(rc.clone(), "p:" + e.id)
+        let tf = av(rc.clone(), "f:" + e.id)
+        let bg = mix_state(mix_state(st.bg, e.hv_bg, th), e.pr_bg, tp)
+        let bc = mix_state(st.bc, e.hv_bc, th)
+        if e.kind == "text_input" or e.kind == "pick_list" [
+            bc = mix_state(bc, e.pr_bc, tf)
+        ]
+        let blur = lerp(st.sh_blur, e.hv_sh, th)
+        if tp > 0.0 [
+            blur = blur * (1.0 - 0.5 * tp)
+        ]
+        if col_a(st.sh_color) > 0 and blur > 0.0 [
+            self.shadow(b.x, b.y, b.w, b.h, st.radius, blur, 0.0, 0.0, st.sh_dy, st.sh_color, false)
+        ]
+        if st.glass > 0.0 [
+            self.backdrop(b.x, b.y, b.w, b.h, st.radius, st.glass, 0)
+        ]
+        if col_a(st.bg2) > 0 and col_a(st.bg) > 0 [
+            let c1 = mix_state(st.bg, e.hv_bg, th)
+            let c2 = mix_state(st.bg2, lighten(st.bg2, 0.08), th)
+            if tp > 0.0 [
+                c1 = mix(c1, e.pr_bg, tp)
+                c2 = mix(c2, e.pr_bg, tp)
+            ]
+            self.lgrad(b.x, b.y, b.w, b.h, st.radius, st.angle, c1, c2)
+        ] else [
+            self.rrect(b.x, b.y, b.w, b.h, st.radius, bg)
+        ]
+        if st.bw > 0.0 [
+            self.stroke(b.x, b.y, b.w, b.h, st.radius, st.bw, bc)
+        ]
+        if (e.kind == "text_input" or e.kind == "pick_list") and tf > 0.01 [
+            self.shadow(b.x, b.y, b.w, b.h, st.radius, 8.0, 1.0, 0.0, 0.0, scale_alpha(rc.theme.p.primary, 0.45 * tf), false)
+            self.stroke(b.x, b.y, b.w, b.h, st.radius, 1.5, scale_alpha(rc.theme.p.primary, tf))
+        ]
+        if e.kind == "button" and rc.focus == e.id [
+            self.stroke(b.x - 2.0, b.y - 2.0, b.w + 4.0, b.h + 4.0, st.radius + 2.0, 2.0, scale_alpha(rc.theme.p.primary, 0.85))
+        ]
+    ]
+
+    pub fun draw_lines(self, b: Box, c: Int) [
+        let e = b.el.clone()
+        let lh = el_line_h(e.clone())
+        let asc = gui_font_ascent(e.st.size, e.st.weight)
+        let desc = gui_font_descent(e.st.size, e.st.weight)
+        let iw = b.w - pad_w(e.clone())
+        let i = 0
+        while i < b.lines.len() [
+            let ln = b.lines[i].clone()
+            let lw = el_text_w(ln.clone(), e.clone())
+            let tx = b.x + e.st.pl
+            if e.st.tx == 1 [
+                tx = tx + (iw - lw) / 2.0
+            ]
+            if e.st.tx == 2 [
+                tx = tx + iw - lw
+            ]
+            let base = b.y + e.st.pt + (i as Float) * lh + (lh - (asc + desc)) / 2.0 + asc
+            self.text(tx, base, e.st.size, e.st.weight, c, ln, e.st.ls)
+            i = i + 1
+        ]
+    ]
+
+    !! tekst w jednej linii wysrodkowany pionowo w prostokacie [y, y+h]
+    pub fun text_mid(self, x: Float, y: Float, h: Float, size: Float, weight: Int, c: Int, t: Str, ls: Float) [
+        let asc = gui_font_ascent(size, weight)
+        let desc = gui_font_descent(size, weight)
+        let base = y + (h - (asc + desc)) / 2.0 + asc
+        self.text(x, base, size, weight, c, t, ls)
+    ]
+
+    pub fun draw_box(self, b: Box, rc: RCtx) [
+        let e = b.el.clone()
+        let st = e.st.clone()
+        let th = av(rc.clone(), "h:" + e.id)
+        let tp = av(rc.clone(), "p:" + e.id)
+        let tf = av(rc.clone(), "f:" + e.id)
+        let tt = av(rc.clone(), "t:" + e.id)
+        let p = rc.theme.p.clone()
+        let layered = false
+        let op = st.opacity
+        if e.disabled [
+            op = op * 0.45
+        ]
+        if op < 0.999 [
+            self.layer(op)
+            layered = true
+        ]
+        if e.kind != "text" and e.kind != "icon" and e.kind != "checkbox" and e.kind != "radio" and e.kind != "toggler" and e.kind != "slider" and e.kind != "progress" and e.kind != "rule" and e.kind != "space" and e.kind != "canvas" and e.kind != "tabs" [
+            self.decor(b.clone(), rc.clone())
+        ]
+        let fg = mix_state(st.fg, e.hv_fg, th)
+        if tp > 0.0 [
+            fg = mix(fg, e.pr_fg, tp)
+        ]
+        if e.kind == "text" [
+            self.draw_lines(b.clone(), st.fg)
+        ]
+        if e.kind == "icon" [
+            let sw = fclamp(st.size / 11.0, 1.4, 2.6)
+            self.icon(b.x + e.st.pl, b.y + e.st.pt, st.size, st.fg, sw, e.text.clone())
+        ]
+        if e.kind == "canvas" [
+            let k = st.size / fmax(1.0, e.vmax)
+            self.svg(b.x, b.y, k, 0, st.fg, 2.0, e.text.clone())
+        ]
+        if e.kind == "button" and b.kids.len() == 0 [
+            let iw = b.w - pad_w(e.clone())
+            let lw = el_text_w(e.text.clone(), e.clone())
+            let total = lw
+            let isz = st.size
+            if e.text2 != "" [
+                total = lw + isz + 8.0
+            ]
+            if e.text == "" [
+                total = isz
+            ]
+            let x0 = b.x + st.pl + (iw - total) / 2.0
+            if e.text2 != "" [
+                self.icon(x0, b.y + (b.h - isz) / 2.0, isz, fg, fclamp(isz / 11.0, 1.4, 2.4), e.text2.clone())
+                x0 = x0 + isz + 8.0
+            ]
+            if e.text != "" [
+                self.text_mid(x0, b.y + st.pt, b.h - pad_h(e.clone()), st.size, st.weight, fg, e.text.clone(), st.ls)
+            ]
+        ]
+        if e.kind == "text_input" [
+            let ix = b.x + st.pl
+            let iw = b.w - pad_w(e.clone())
+            let shown = shown_text(e.clone())
+            let caret = 0
+            match rc.caret.fetch(e.id.clone()) [
+                Some(v) -> [
+                    caret = v
+                ]
+                None -> [
+                    caret = slen(shown.clone())
+                ]
+            ]
+            caret = iclamp(caret, 0, slen(shown.clone()))
+            let cx = text_prefix_w(e.clone(), shown.clone(), caret)
+            let sx = fmax(0.0, cx - iw + 8.0)
+            self.clip(ix - 2.0, b.y + 1.0, iw + 4.0, b.h - 2.0, 0.0)
+            if slen(shown.clone()) == 0 [
+                self.text_mid(ix, b.y + st.pt, b.h - pad_h(e.clone()), st.size, 0, p.muted, e.text2.clone(), 0.0)
+            ] else [
+                if rc.focus == e.id [
+                    let anchor = caret
+                    match rc.sel.fetch(e.id.clone()) [
+                        Some(v) -> [
+                            anchor = iclamp(v, 0, slen(shown.clone()))
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    if anchor != caret [
+                        let a = text_prefix_w(e.clone(), shown.clone(), anchor)
+                        let lo = fmin(a, cx)
+                        let hi = fmax(a, cx)
+                        self.rrect(ix - sx + lo, b.y + st.pt - 1.0, hi - lo, b.h - pad_h(e.clone()) + 2.0, 3.0, with_alpha(p.primary, 90))
+                    ]
+                ]
+                self.text_mid(ix - sx, b.y + st.pt, b.h - pad_h(e.clone()), st.size, st.weight, st.fg, shown.clone(), st.ls)
+            ]
+            if rc.focus == e.id and rc.caret_on [
+                let lh = el_line_h(e.clone())
+                self.rrect(ix - sx + cx, b.y + (b.h - lh) / 2.0 + 1.0, 1.5, lh - 2.0, 1.0, st.fg)
+            ]
+            self.unclip()
+        ]
+        if e.kind == "pick_list" [
+            self.text_mid(b.x + st.pl, b.y + st.pt, b.h - pad_h(e.clone()), st.size, st.weight, st.fg, e.text.clone(), 0.0)
+            self.icon(b.x + b.w - st.pr - 16.0, b.y + (b.h - 16.0) / 2.0, 16.0, p.subtext, 2.0, "chevron-down")
+        ]
+        if e.kind == "checkbox" [
+            let bs = 20.0
+            let by = b.y + (b.h - bs) / 2.0
+            let on = tt
+            let border = mix_state(p.surface3, p.primary, on)
+            border = mix(border, lighten(border, 0.25), th)
+            self.rrect(b.x, by, bs, bs, 6.0, mix_state(p.overlay, p.primary, on))
+            self.stroke(b.x, by, bs, bs, 6.0, 1.5, border)
+            if on > 0.02 [
+                self.icon(b.x + 2.0, by + 2.0, 16.0, scale_alpha(p.primary_text, on), 2.6, "check")
+            ]
+            self.text_mid(b.x + bs + st.gap, b.y, b.h, st.size, st.weight, st.fg, e.text.clone(), st.ls)
+            if rc.focus == e.id [
+                self.stroke(b.x - 3.0, by - 3.0, bs + 6.0, bs + 6.0, 8.0, 2.0, scale_alpha(p.primary, 0.85))
+            ]
+        ]
+        if e.kind == "radio" [
+            let bs = 20.0
+            let by = b.y + (b.h - bs) / 2.0
+            let on = tt
+            let border = mix_state(p.surface3, p.primary, on)
+            border = mix(border, lighten(border, 0.25), th)
+            self.rrect(b.x, by, bs, bs, 10.0, p.overlay)
+            self.stroke(b.x, by, bs, bs, 10.0, 1.5, border)
+            if on > 0.02 [
+                let d = 10.0 * on
+                self.rrect(b.x + 10.0 - d / 2.0, by + 10.0 - d / 2.0, d, d, d / 2.0, p.primary)
+            ]
+            self.text_mid(b.x + bs + st.gap, b.y, b.h, st.size, st.weight, st.fg, e.text.clone(), st.ls)
+            if rc.focus == e.id [
+                self.stroke(b.x - 3.0, by - 3.0, bs + 6.0, bs + 6.0, 13.0, 2.0, scale_alpha(p.primary, 0.85))
+            ]
+        ]
+        if e.kind == "toggler" [
+            let tw = 38.0
+            let thh = 22.0
+            let ty = b.y + (b.h - thh) / 2.0
+            let on = tt
+            let track = mix(p.surface3, p.primary, on)
+            track = mix(track, lighten(track, 0.12), th)
+            self.rrect(b.x, ty, tw, thh, thh / 2.0, track)
+            let kx = b.x + 3.0 + on * (tw - thh)
+            self.shadow(kx, ty + 3.0, 16.0, 16.0, 8.0, 5.0, 0.0, 0.0, 1.5, rgba(0, 0, 0, 90), false)
+            let knob = mix(p.text, p.primary_text, on * 0.0)
+            self.rrect(kx, ty + 3.0, 16.0 + 2.0 * tp, 16.0, 8.0, mix(rgb(235, 238, 250), rgb(255, 255, 255), on))
+            if e.text != "" [
+                self.text_mid(b.x + tw + st.gap, b.y, b.h, st.size, st.weight, st.fg, e.text.clone(), st.ls)
+            ]
+            if rc.focus == e.id [
+                self.stroke(b.x - 3.0, ty - 3.0, tw + 6.0, thh + 6.0, thh / 2.0 + 3.0, 2.0, scale_alpha(p.primary, 0.85))
+            ]
+        ]
+        if e.kind == "slider" [
+            let span = fmax(0.0001, e.vmax - e.vmin)
+            let ratio = fclamp((e.v - e.vmin) / span, 0.0, 1.0)
+            let rail_h = 4.0
+            let ry = b.y + (b.h - rail_h) / 2.0
+            let kr = 8.0 + 1.5 * th + 1.0 * tp
+            let kx = b.x + kr + ratio * (b.w - 2.0 * kr)
+            self.rrect(b.x + kr, ry, b.w - 2.0 * kr, rail_h, 2.0, p.surface3)
+            self.rrect(b.x + kr, ry, kx - b.x - kr, rail_h, 2.0, p.primary)
+            self.shadow(kx - kr, b.y + b.h / 2.0 - kr, kr * 2.0, kr * 2.0, kr, 8.0, 0.0, 0.0, 2.0, rgba(0, 0, 0, 110), false)
+            self.rrect(kx - kr, b.y + b.h / 2.0 - kr, kr * 2.0, kr * 2.0, kr, rgb(245, 247, 255))
+            self.rrect(kx - 4.0, b.y + b.h / 2.0 - 4.0, 8.0, 8.0, 4.0, p.primary)
+            if rc.focus == e.id [
+                self.stroke(kx - kr - 3.0, b.y + b.h / 2.0 - kr - 3.0, kr * 2.0 + 6.0, kr * 2.0 + 6.0, kr + 3.0, 2.0, scale_alpha(p.primary, 0.85))
+            ]
+        ]
+        if e.kind == "progress" [
+            let span = fmax(0.0001, e.vmax - e.vmin)
+            let ratio = fclamp((e.v - e.vmin) / span, 0.0, 1.0)
+            self.rrect(b.x, b.y, b.w, b.h, st.radius, st.bg)
+            if ratio > 0.0 [
+                let fw = fmax(b.h, b.w * ratio)
+                self.lgrad(b.x, b.y, fw, b.h, st.radius, 90.0, st.fg, lighten(st.fg, 0.18))
+            ]
+        ]
+        if e.kind == "rule" [
+            if b.w >= b.h [
+                self.rrect(b.x, b.y + b.h / 2.0 - 0.5, b.w, 1.0, 0.0, st.bg)
+            ] else [
+                self.rrect(b.x + b.w / 2.0 - 0.5, b.y, 1.0, b.h, 0.0, st.bg)
+            ]
+        ]
+        if e.kind == "tabs" [
+            self.decor(b.clone(), rc.clone())
+            let sel = e.v as Int
+            let i = 0
+            while i < e.opts.len() [
+                let tx = tab_x(b.clone(), i)
+                let tw = tab_w(b.clone(), i)
+                let ty = b.y + st.pt
+                let th2 = b.h - pad_h(e.clone())
+                let key = e.id + "#" + (i as Str)
+                let hv = av(rc.clone(), "h:" + key)
+                let on = av(rc.clone(), "t:" + key)
+                if on > 0.01 [
+                    self.shadow(tx, ty, tw, th2, st.radius - 2.0, 6.0, 0.0, 0.0, 2.0, rgba(0, 0, 0, 50), false)
+                    self.rrect(tx, ty, tw, th2, st.radius - 2.0, mix(p.surface2, p.surface3, on))
+                ] else [
+                    self.rrect(tx, ty, tw, th2, st.radius - 2.0, with_alpha(p.text, (hv * 18.0) as Int))
+                ]
+                let c = mix(p.subtext, p.text, on)
+                let lw = gui_text_measure(e.opts[i].clone(), st.size, 1, 0.0)
+                self.text_mid(tx + (tw - lw) / 2.0, ty, th2, st.size, 1, c, e.opts[i].clone(), 0.0)
+                i = i + 1
+            ]
+        ]
+        if e.kind == "checkbox" or e.kind == "radio" or e.kind == "toggler" or e.kind == "text" or e.kind == "icon" [
+            let skip = 0
+        ]
+        let clipped = false
+        if st.clip == 1 [
+            self.clip(b.x, b.y, b.w, b.h, st.radius)
+            clipped = true
+        ]
+        let i = 0
+        while i < b.kids.len() [
+            self.draw_box(b.kids[i].clone(), rc.clone())
+            i = i + 1
+        ]
+        if e.kind == "scrollable" and b.ch > b.h - pad_h(e.clone()) [
+            let vh = b.h - pad_h(e.clone())
+            let ratio = vh / b.ch
+            let th3 = fmax(24.0, vh * ratio)
+            let maxs = fmax(1.0, b.ch - vh)
+            let ty = b.y + st.pt + (vh - th3) * (b.sc / maxs)
+            let sa = 0.25 + 0.5 * fmax(th, av(rc.clone(), "s:" + e.id))
+            self.rrect(b.x + b.w - 7.0, ty, 4.0, th3, 2.0, scale_alpha(p.text, sa * 0.6))
+        ]
+        if clipped [
+            self.unclip()
+        ]
+        if layered [
+            self.endlayer()
+        ]
+    ]
+
+    !! nakladki: otwarta lista pick_list, tooltip - rysowane NA KONCU, ponad wszystkim
+    pub fun draw_overlays(self, b: Box, rc: RCtx) [
+        let e = b.el.clone()
+        let p = rc.theme.p.clone()
+        let th = rc.theme.clone()
+        if e.kind == "pick_list" and rc.open_pick == e.id [
+            let rh = pick_row_h()
+            let lw = pick_list_w(b.clone())
+            let n = e.opts.len()
+            let lh = rh * (n as Float) + 8.0
+            let lx = b.x
+            let ly = b.y + b.h + 4.0
+            if ly + lh > rc.wh - 4.0 [
+                ly = b.y - lh - 4.0
+            ]
+            self.shadow(lx, ly, lw, lh, 12.0, 28.0, 0.0, 0.0, 10.0, rgba(0, 0, 0, 120), false)
+            if th.glass [
+                self.backdrop(lx, ly, lw, lh, 12.0, 24.0, 0)
+            ]
+            self.rrect(lx, ly, lw, lh, 12.0, p.surface)
+            self.stroke(lx, ly, lw, lh, 12.0, 1.0, p.border)
+            let i = 0
+            while i < n [
+                let ry = ly + 4.0 + rh * (i as Float)
+                let hv = rc.pick_hover == i
+                if hv [
+                    self.rrect(lx + 4.0, ry, lw - 8.0, rh, 8.0, with_alpha(p.primary, 46))
+                ]
+                let selected = e.opts[i] == e.text
+                let c = p.text
+                if selected [
+                    c = p.primary
+                ]
+                self.text_mid(lx + 14.0, ry, rh, e.st.size, e.st.weight, c, e.opts[i].clone(), 0.0)
+                if selected [
+                    self.icon(lx + lw - 30.0, ry + (rh - 16.0) / 2.0, 16.0, p.primary, 2.4, "check")
+                ]
+                i = i + 1
+            ]
+        ]
+        if e.kind == "tooltip" and rc.tip == e.id and e.text != "" [
+            let tw = gui_text_measure(e.text.clone(), th.font_sm, 0, 0.0) + 20.0
+            let thh = th.font_sm * 1.4 + 12.0
+            let tx = fclamp(b.x + (b.w - tw) / 2.0, 4.0, fmax(4.0, rc.ww - tw - 4.0))
+            let ty = b.y + b.h + 8.0
+            if ty + thh > rc.wh [
+                ty = b.y - thh - 8.0
+            ]
+            self.shadow(tx, ty, tw, thh, 8.0, 14.0, 0.0, 0.0, 4.0, rgba(0, 0, 0, 100), false)
+            self.rrect(tx, ty, tw, thh, 8.0, p.overlay)
+            self.stroke(tx, ty, tw, thh, 8.0, 1.0, p.border)
+            self.text_mid(tx + 10.0, ty, thh, th.font_sm, 0, p.text, e.text.clone(), 0.0)
+        ]
+        let i = 0
+        while i < b.kids.len() [
+            self.draw_overlays(b.kids[i].clone(), rc.clone())
+            i = i + 1
+        ]
+    ]
+]
+
+!! Cala scena: tlo + drzewo + nakladki
+fun render_scene(root: Box, rc: RCtx, clear: Int) -> Ops [
+    let o = ops_new()
+    o.clear_all(clear)
+    o.draw_box(root.clone(), rc.clone())
+    o.draw_overlays(root.clone(), rc.clone())
+    end o
+]
