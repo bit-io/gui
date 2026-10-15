@@ -1,0 +1,687 @@
+get <bit:gui::util>
+get <bit:gui::color>
+
+!! Dlugosc jak w iced: shrink (do tresci), fixed(px), fill / portion(n) (czesc wolnego miejsca).
+!! kind: -1 nieustawione, 0 shrink, 1 fixed, 2 fill/portion
+struct Length [
+    kind: Int,
+    v: Float
+]
+
+fun shrink() -> Length [
+    end Length(0, 1.0)
+]
+
+fun fixed(v: Float) -> Length [
+    end Length(1, v)
+]
+
+fun fill() -> Length [
+    end Length(2, 1.0)
+]
+
+fun portion(n: Float) -> Length [
+    end Length(2, n)
+]
+
+fun len_unset() -> Length [
+    end Length(-1, 0.0)
+]
+
+!! Styl: kazde pole moze byc "nieustawione" (UNSET / UNSET_I / kind -1) - wtedy decyduje CSS lub motyw.
+struct Style [
+    pt: Float,
+    pr: Float,
+    pb: Float,
+    pl: Float,
+    mt: Float,
+    mr: Float,
+    mb: Float,
+    ml: Float,
+    gap: Float,
+    w: Length,
+    h: Length,
+    min_w: Float,
+    max_w: Float,
+    min_h: Float,
+    max_h: Float,
+    ax: Int,
+    ay: Int,
+    bg: Int,
+    bg2: Int,
+    angle: Float,
+    radius: Float,
+    bw: Float,
+    bc: Int,
+    sh_blur: Float,
+    sh_dy: Float,
+    sh_color: Int,
+    glass: Float,
+    opacity: Float,
+    fg: Int,
+    size: Float,
+    weight: Int,
+    ls: Float,
+    line_h: Float,
+    tx: Int,
+    wrap: Int,
+    clip: Int
+]
+
+fun style_unset() -> Style [
+    end Style(UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, len_unset(), len_unset(), UNSET, UNSET, UNSET, UNSET, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET, UNSET, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET_I, UNSET_I)
+]
+
+!! Zlacz style: pola ustawione w `over` wygrywaja z `base` (kaskada CSS: motyw -> arkusz -> inline).
+fun style_merge(base: Style, over: Style) -> Style [
+    let s = base.clone()
+    if over.pt != UNSET [
+        s.pt = over.pt
+    ]
+    if over.pr != UNSET [
+        s.pr = over.pr
+    ]
+    if over.pb != UNSET [
+        s.pb = over.pb
+    ]
+    if over.pl != UNSET [
+        s.pl = over.pl
+    ]
+    if over.mt != UNSET [
+        s.mt = over.mt
+    ]
+    if over.mr != UNSET [
+        s.mr = over.mr
+    ]
+    if over.mb != UNSET [
+        s.mb = over.mb
+    ]
+    if over.ml != UNSET [
+        s.ml = over.ml
+    ]
+    if over.gap != UNSET [
+        s.gap = over.gap
+    ]
+    if over.w.kind >= 0 [
+        s.w = over.w.clone()
+    ]
+    if over.h.kind >= 0 [
+        s.h = over.h.clone()
+    ]
+    if over.min_w != UNSET [
+        s.min_w = over.min_w
+    ]
+    if over.max_w != UNSET [
+        s.max_w = over.max_w
+    ]
+    if over.min_h != UNSET [
+        s.min_h = over.min_h
+    ]
+    if over.max_h != UNSET [
+        s.max_h = over.max_h
+    ]
+    if over.ax != UNSET_I [
+        s.ax = over.ax
+    ]
+    if over.ay != UNSET_I [
+        s.ay = over.ay
+    ]
+    if over.bg != UNSET_I [
+        s.bg = over.bg
+    ]
+    if over.bg2 != UNSET_I [
+        s.bg2 = over.bg2
+    ]
+    if over.angle != UNSET [
+        s.angle = over.angle
+    ]
+    if over.radius != UNSET [
+        s.radius = over.radius
+    ]
+    if over.bw != UNSET [
+        s.bw = over.bw
+    ]
+    if over.bc != UNSET_I [
+        s.bc = over.bc
+    ]
+    if over.sh_blur != UNSET [
+        s.sh_blur = over.sh_blur
+    ]
+    if over.sh_dy != UNSET [
+        s.sh_dy = over.sh_dy
+    ]
+    if over.sh_color != UNSET_I [
+        s.sh_color = over.sh_color
+    ]
+    if over.glass != UNSET [
+        s.glass = over.glass
+    ]
+    if over.opacity != UNSET [
+        s.opacity = over.opacity
+    ]
+    if over.fg != UNSET_I [
+        s.fg = over.fg
+    ]
+    if over.size != UNSET [
+        s.size = over.size
+    ]
+    if over.weight != UNSET_I [
+        s.weight = over.weight
+    ]
+    if over.ls != UNSET [
+        s.ls = over.ls
+    ]
+    if over.line_h != UNSET [
+        s.line_h = over.line_h
+    ]
+    if over.tx != UNSET_I [
+        s.tx = over.tx
+    ]
+    if over.wrap != UNSET_I [
+        s.wrap = over.wrap
+    ]
+    if over.clip != UNSET_I [
+        s.clip = over.clip
+    ]
+    end s
+]
+
+!! Komunikat zwracany przez widgety (odpowiednik `Message` z iced). `id` to nazwa podana w .on_press("id") itp.
+struct Message [
+    id: Str,
+    text: Str,
+    text2: Str,
+    text3: Str,
+    num: Float,
+    flag: Bool,
+    idx: Int,
+    win: Int,
+    args: List<Str>
+]
+
+fun message(id: Str) -> Message [
+    let a: List<Str> = []
+    end Message(id, "", "", "", 0.0, false, 0, 0, a)
+]
+
+fun msg_is(m: Message, id: Str) -> Bool [
+    end m.id == id
+]
+
+!! Wspolny wezel drzewa. `kind`: column row container text button icon text_input checkbox toggler radio slider
+!! progress scrollable space rule stack tooltip pick_list tabs canvas
+struct Element [
+    kind: Str,
+    id: Str,
+    class: Str,
+    text: Str,
+    text2: Str,
+    kids: List<Element>,
+    st: Style,
+    msg: Str,
+    msg2: Str,
+    v: Float,
+    vmin: Float,
+    vmax: Float,
+    step: Float,
+    on: Bool,
+    disabled: Bool,
+    secret: Bool,
+    opts: List<Str>,
+    hv_bg: Int,
+    hv_fg: Int,
+    hv_bc: Int,
+    pr_bg: Int,
+    pr_fg: Int,
+    pr_bc: Int,
+    hv_sh: Float
+]
+
+fun el_new(kind: Str) -> Element [
+    let none_list: List<Element> = []
+    let no_opts: List<Str> = []
+    end Element(kind, "", "", "", "", none_list, style_unset(), "", "", 0.0, 0.0, 1.0, 0.0, false, false, false, no_opts, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET)
+]
+
+!! ---------------------------------------------------------------- konstruktory (jak w iced)
+fun column(kids: List<Element>) -> Element [
+    let e = el_new("column")
+    e.kids = kids
+    end e
+]
+
+fun row(kids: List<Element>) -> Element [
+    let e = el_new("row")
+    e.kids = kids
+    end e
+]
+
+fun stack(kids: List<Element>) -> Element [
+    let e = el_new("stack")
+    e.kids = kids
+    end e
+]
+
+fun container(child: Element) -> Element [
+    let e = el_new("container")
+    e.kids = [child]
+    end e
+]
+
+fun text(s: Str) -> Element [
+    let e = el_new("text")
+    e.text = s
+    end e
+]
+
+fun icon(name: Str) -> Element [
+    let e = el_new("icon")
+    e.text = name
+    end e
+]
+
+fun button(label: Str) -> Element [
+    let e = el_new("button")
+    e.text = label
+    end e
+]
+
+fun button_with(child: Element) -> Element [
+    let e = el_new("button")
+    e.kids = [child]
+    end e
+]
+
+fun text_input(placeholder: Str, value: Str) -> Element [
+    let e = el_new("text_input")
+    e.text = value
+    e.text2 = placeholder
+    end e
+]
+
+fun checkbox(label: Str, checked: Bool) -> Element [
+    let e = el_new("checkbox")
+    e.text = label
+    e.on = checked
+    end e
+]
+
+fun toggler(label: Str, on: Bool) -> Element [
+    let e = el_new("toggler")
+    e.text = label
+    e.on = on
+    end e
+]
+
+fun radio(label: Str, selected: Bool) -> Element [
+    let e = el_new("radio")
+    e.text = label
+    e.on = selected
+    end e
+]
+
+fun slider(lo: Float, hi: Float, value: Float) -> Element [
+    let e = el_new("slider")
+    e.vmin = lo
+    e.vmax = hi
+    e.v = value
+    end e
+]
+
+fun progress_bar(lo: Float, hi: Float, value: Float) -> Element [
+    let e = el_new("progress")
+    e.vmin = lo
+    e.vmax = hi
+    e.v = value
+    end e
+]
+
+fun scrollable(child: Element) -> Element [
+    let e = el_new("scrollable")
+    e.kids = [child]
+    end e
+]
+
+fun space() -> Element [
+    end el_new("space")
+]
+
+fun rule() -> Element [
+    end el_new("rule")
+]
+
+fun tooltip(child: Element, tip: Str) -> Element [
+    let e = el_new("tooltip")
+    e.kids = [child]
+    e.text = tip
+    end e
+]
+
+fun pick_list(options: List<Str>, selected: Str) -> Element [
+    let e = el_new("pick_list")
+    e.opts = options
+    e.text = selected
+    end e
+]
+
+!! Segmentowany przelacznik kart; `selected` = indeks
+fun tabs(options: List<Str>, selected: Int) -> Element [
+    let e = el_new("tabs")
+    e.opts = options
+    e.v = selected as Float
+    end e
+]
+
+!! Wlasny rysunek: sciezka SVG (M L C Q A Z...) w ukladzie 0..vb (viewBox kwadratowy)
+fun canvas(path_d: Str, viewbox: Float) -> Element [
+    let e = el_new("canvas")
+    e.text = path_d
+    e.vmax = viewbox
+    end e
+]
+
+fun vspace(h: Float) -> Element [
+    let e = el_new("space")
+    e.st.h = fixed(h)
+    e.st.w = fixed(0.0)
+    end e
+]
+
+fun hspace(w: Float) -> Element [
+    let e = el_new("space")
+    e.st.w = fixed(w)
+    e.st.h = fixed(0.0)
+    end e
+]
+
+!! Gotowe warianty
+fun card(child: Element) -> Element [
+    let e = container(child)
+    e.class = "card"
+    end e
+]
+
+fun badge(label: Str) -> Element [
+    let e = container(text(label))
+    e.class = "badge"
+    end e
+]
+
+fun heading(s: Str) -> Element [
+    let e = text(s)
+    e.class = "heading"
+    end e
+]
+
+fun caption(s: Str) -> Element [
+    let e = text(s)
+    e.class = "caption"
+    end e
+]
+
+!! ---------------------------------------------------------------- metody lancuchowe
+impl Element [
+    pub fun id(self, v: Str) -> Element [
+        let e = self.clone()
+        e.id = v
+        end e
+    ]
+    pub fun class(self, v: Str) -> Element [
+        let e = self.clone()
+        e.class = v
+        end e
+    ]
+    pub fun padding(self, p: Float) -> Element [
+        let e = self.clone()
+        e.st.pt = p
+        e.st.pr = p
+        e.st.pb = p
+        e.st.pl = p
+        end e
+    ]
+    pub fun padding_xy(self, x: Float, y: Float) -> Element [
+        let e = self.clone()
+        e.st.pt = y
+        e.st.pb = y
+        e.st.pl = x
+        e.st.pr = x
+        end e
+    ]
+    pub fun padding_4(self, t: Float, r: Float, b: Float, l: Float) -> Element [
+        let e = self.clone()
+        e.st.pt = t
+        e.st.pr = r
+        e.st.pb = b
+        e.st.pl = l
+        end e
+    ]
+    pub fun margin(self, m: Float) -> Element [
+        let e = self.clone()
+        e.st.mt = m
+        e.st.mr = m
+        e.st.mb = m
+        e.st.ml = m
+        end e
+    ]
+    pub fun spacing(self, g: Float) -> Element [
+        let e = self.clone()
+        e.st.gap = g
+        end e
+    ]
+    pub fun width(self, l: Length) -> Element [
+        let e = self.clone()
+        e.st.w = l
+        end e
+    ]
+    pub fun height(self, l: Length) -> Element [
+        let e = self.clone()
+        e.st.h = l
+        end e
+    ]
+    pub fun size_px(self, w: Float, h: Float) -> Element [
+        let e = self.clone()
+        e.st.w = fixed(w)
+        e.st.h = fixed(h)
+        end e
+    ]
+    pub fun fill_width(self) -> Element [
+        let e = self.clone()
+        e.st.w = fill()
+        end e
+    ]
+    pub fun fill_height(self) -> Element [
+        let e = self.clone()
+        e.st.h = fill()
+        end e
+    ]
+    pub fun fill_all(self) -> Element [
+        let e = self.clone()
+        e.st.w = fill()
+        e.st.h = fill()
+        end e
+    ]
+    pub fun min_width(self, v: Float) -> Element [
+        let e = self.clone()
+        e.st.min_w = v
+        end e
+    ]
+    pub fun max_width(self, v: Float) -> Element [
+        let e = self.clone()
+        e.st.max_w = v
+        end e
+    ]
+    pub fun min_height(self, v: Float) -> Element [
+        let e = self.clone()
+        e.st.min_h = v
+        end e
+    ]
+    pub fun max_height(self, v: Float) -> Element [
+        let e = self.clone()
+        e.st.max_h = v
+        end e
+    ]
+    !! wyrownanie: 0 start, 1 srodek, 2 koniec
+    pub fun align_x(self, a: Int) -> Element [
+        let e = self.clone()
+        e.st.ax = a
+        end e
+    ]
+    pub fun align_y(self, a: Int) -> Element [
+        let e = self.clone()
+        e.st.ay = a
+        end e
+    ]
+    pub fun center(self) -> Element [
+        let e = self.clone()
+        e.st.ax = 1
+        e.st.ay = 1
+        e.st.w = fill()
+        e.st.h = fill()
+        end e
+    ]
+    pub fun center_x(self) -> Element [
+        let e = self.clone()
+        e.st.ax = 1
+        e.st.w = fill()
+        end e
+    ]
+    pub fun center_y(self) -> Element [
+        let e = self.clone()
+        e.st.ay = 1
+        e.st.h = fill()
+        end e
+    ]
+    pub fun background(self, c: Int) -> Element [
+        let e = self.clone()
+        e.st.bg = c
+        end e
+    ]
+    pub fun gradient(self, from: Int, to: Int, angle: Float) -> Element [
+        let e = self.clone()
+        e.st.bg = from
+        e.st.bg2 = to
+        e.st.angle = angle
+        end e
+    ]
+    pub fun color(self, c: Int) -> Element [
+        let e = self.clone()
+        e.st.fg = c
+        end e
+    ]
+    pub fun size(self, s: Float) -> Element [
+        let e = self.clone()
+        e.st.size = s
+        end e
+    ]
+    pub fun bold(self) -> Element [
+        let e = self.clone()
+        e.st.weight = 1
+        end e
+    ]
+    pub fun letter_spacing(self, v: Float) -> Element [
+        let e = self.clone()
+        e.st.ls = v
+        end e
+    ]
+    pub fun line_height(self, v: Float) -> Element [
+        let e = self.clone()
+        e.st.line_h = v
+        end e
+    ]
+    pub fun text_align(self, a: Int) -> Element [
+        let e = self.clone()
+        e.st.tx = a
+        end e
+    ]
+    pub fun no_wrap(self) -> Element [
+        let e = self.clone()
+        e.st.wrap = 0
+        end e
+    ]
+    pub fun radius(self, r: Float) -> Element [
+        let e = self.clone()
+        e.st.radius = r
+        end e
+    ]
+    pub fun border(self, w: Float, c: Int) -> Element [
+        let e = self.clone()
+        e.st.bw = w
+        e.st.bc = c
+        end e
+    ]
+    pub fun shadow(self, blur: Float, dy: Float, c: Int) -> Element [
+        let e = self.clone()
+        e.st.sh_blur = blur
+        e.st.sh_dy = dy
+        e.st.sh_color = c
+        end e
+    ]
+    !! efekt szkla: rozmycie tla pod elementem (px)
+    pub fun glass(self, blur: Float) -> Element [
+        let e = self.clone()
+        e.st.glass = blur
+        end e
+    ]
+    pub fun opacity(self, o: Float) -> Element [
+        let e = self.clone()
+        e.st.opacity = o
+        end e
+    ]
+    pub fun clip(self) -> Element [
+        let e = self.clone()
+        e.st.clip = 1
+        end e
+    ]
+    pub fun disabled(self, d: Bool) -> Element [
+        let e = self.clone()
+        e.disabled = d
+        end e
+    ]
+    pub fun secret(self) -> Element [
+        let e = self.clone()
+        e.secret = true
+        end e
+    ]
+    !! ---- zdarzenia: nazwa komunikatu zwracanego przez App
+    pub fun on_press(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg = m
+        end e
+    ]
+    pub fun on_toggle(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg = m
+        end e
+    ]
+    pub fun on_change(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg = m
+        end e
+    ]
+    pub fun on_input(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg = m
+        end e
+    ]
+    pub fun on_submit(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg2 = m
+        end e
+    ]
+    pub fun on_select(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg = m
+        end e
+    ]
+    pub fun step(self, s: Float) -> Element [
+        let e = self.clone()
+        e.step = s
+        end e
+    ]
+    !! wlasna ikona obok etykiety przycisku / pola
+    pub fun with_icon(self, name: Str) -> Element [
+        let e = self.clone()
+        e.text2 = name
+        end e
+    ]
+]
