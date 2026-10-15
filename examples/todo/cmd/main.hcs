@@ -1,0 +1,82 @@
+get <bit:gui>
+
+struct Task [
+    title: Str,
+    done: Bool
+]
+
+struct State [
+    tasks: List<Task>,
+    input: Str,
+    filter: Int
+]
+
+fun update(state: State, m: Message) -> State [
+    let s = state.clone()
+    if m.id == "input" [
+        s.input = m.text.clone()
+    ]
+    if m.id == "add" [
+        if slen(s.input.clone()) > 0 [
+            s.tasks.push(Task(s.input.clone(), false))
+            s.input = ""
+        ]
+    ]
+    if m.id == "filter" [
+        s.filter = m.idx
+    ]
+    if s_starts(m.id.clone(), "done:") [
+        let i = parse_i(s_sub(m.id.clone(), 5, slen(m.id.clone())))
+        if i < s.tasks.len() [
+            s.tasks[i].done = m.flag
+        ]
+    ]
+    if s_starts(m.id.clone(), "del:") [
+        let i = parse_i(s_sub(m.id.clone(), 4, slen(m.id.clone())))
+        let keep: List<Task> = []
+        let k = 0
+        while k < s.tasks.len() [
+            if k != i [
+                keep.push(s.tasks[k].clone())
+            ]
+            k = k + 1
+        ]
+        s.tasks = keep
+    ]
+    end s
+]
+
+fun view(state: State) -> Element [
+    let rows: List<Element> = []
+    let left = 0
+    let i = 0
+    while i < state.tasks.len() [
+        let t = state.tasks[i].clone()
+        if not t.done [
+            left = left + 1
+        ]
+        let show = state.filter == 0 or (state.filter == 1 and not t.done) or (state.filter == 2 and t.done)
+        if show [
+            let line = row([ checkbox(t.title.clone(), t.done).on_toggle("done:" + (i as Str)), space().fill_width(), button("").with_icon("trash").class("ghost icon").on_press("del:" + (i as Str)) ]).align_y(1)
+            let r = container(line).padding_xy(12.0, 6.0)
+            r.class = "panel"
+            rows.push(r.radius(10.0))
+        ]
+        i = i + 1
+    ]
+    let add = row([ text_input("Nowe zadanie…", state.input.clone()).on_input("input").on_submit("add"), button("Dodaj").class("primary").on_press("add") ]).spacing(10.0)
+    let head = row([ heading("Zadania"), space().fill_width(), text((left as Str) + " do zrobienia").class("caption") ]).align_y(1)
+    let list = scrollable(column(rows).spacing(6.0).fill_width())
+    end column([ head, add, tabs(["Wszystkie", "Aktywne", "Zrobione"], state.filter).on_select("filter"), list ]).spacing(14.0).padding(22.0).fill_all()
+]
+
+fun main() [
+    let app = app_new("Zadania", 480, 560)
+    let tasks: List<Task> = [ Task("Napisać bibliotekę gui", true), Task("Przetestować na Waylandzie", true), Task("Zrobić powłokę", false), Task("Zażółcić gęślą jaźń", false) ]
+    let state = State(tasks, "", 0)
+    while app.running() [
+        for m in app.frame1(view(state.clone())) [
+            state = update(state.clone(), m)
+        ]
+    ]
+]
