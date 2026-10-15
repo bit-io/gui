@@ -1,0 +1,363 @@
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::theme>
+get <bit:gui::element>
+get <bit:gui::css>
+
+struct Ctx [
+    theme: Theme,
+    sheet: Sheet,
+    hover: Str,
+    pressed: Str,
+    focus: Str
+]
+
+!! Styl bazowy - wszystko konkretne
+fun style_base(th: Theme) -> Style [
+    let s = style_unset()
+    s.pt = 0.0
+    s.pr = 0.0
+    s.pb = 0.0
+    s.pl = 0.0
+    s.mt = 0.0
+    s.mr = 0.0
+    s.mb = 0.0
+    s.ml = 0.0
+    s.gap = 0.0
+    s.w = shrink()
+    s.h = shrink()
+    s.min_w = 0.0
+    s.max_w = 0.0
+    s.min_h = 0.0
+    s.max_h = 0.0
+    s.ax = 0
+    s.ay = 0
+    s.bg = 0
+    s.bg2 = 0
+    s.angle = 180.0
+    s.radius = 0.0
+    s.bw = 0.0
+    s.bc = 0
+    s.sh_blur = 0.0
+    s.sh_dy = 0.0
+    s.sh_color = 0
+    s.glass = 0.0
+    s.opacity = 1.0
+    s.fg = th.p.text
+    s.size = th.font
+    s.weight = 0
+    s.ls = 0.0
+    s.line_h = 1.4
+    s.tx = 0
+    s.wrap = 1
+    s.clip = 0
+    end s
+]
+
+fun has_class(class: Str, name: Str) -> Bool [
+    let parts = css_split_top(class, " ")
+    let i = 0
+    while i < parts.len() [
+        if parts[i] == name [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!! Domyslny wyglad dla `kind` (+ klasy wbudowane: primary danger success ghost card badge heading caption ...)
+fun widget_style(th: Theme, kind: Str, class: Str) -> Style [
+    let s = style_base(th)
+    let p = th.p.clone()
+    if kind == "button" [
+        s.pt = 9.0
+        s.pb = 9.0
+        s.pl = 16.0
+        s.pr = 16.0
+        s.radius = th.radius
+        s.bg = p.surface2
+        s.bw = 1.0
+        s.bc = p.border
+        s.weight = 1
+        s.ax = 1
+        s.ay = 1
+        s.sh_blur = 6.0
+        s.sh_dy = 2.0
+        s.sh_color = rgba(0, 0, 0, 40)
+        if has_class(class, "primary") [
+            s.bg = p.primary
+            s.bg2 = lighten(p.primary, 0.12)
+            s.angle = 0.0
+            s.fg = p.primary_text
+            s.bc = 0
+            s.bw = 0.0
+        ]
+        if has_class(class, "danger") [
+            s.bg = p.danger
+            s.fg = p.primary_text
+            s.bc = 0
+            s.bw = 0.0
+        ]
+        if has_class(class, "success") [
+            s.bg = p.success
+            s.fg = p.primary_text
+            s.bc = 0
+            s.bw = 0.0
+        ]
+        if has_class(class, "ghost") [
+            s.bg = 0
+            s.bc = 0
+            s.bw = 0.0
+            s.sh_blur = 0.0
+            s.sh_color = 0
+        ]
+        if has_class(class, "icon") [
+            s.pt = 8.0
+            s.pb = 8.0
+            s.pl = 8.0
+            s.pr = 8.0
+            s.radius = 999.0
+        ]
+    ]
+    if kind == "text" [
+        if has_class(class, "heading") [
+            s.size = th.font_title
+            s.weight = 1
+            s.line_h = 1.25
+        ]
+        if has_class(class, "subheading") [
+            s.size = th.font_lg
+            s.weight = 1
+        ]
+        if has_class(class, "caption") [
+            s.size = th.font_sm
+            s.fg = p.subtext
+        ]
+        if has_class(class, "muted") [
+            s.fg = p.muted
+        ]
+        if has_class(class, "primary") [
+            s.fg = p.primary
+        ]
+        if has_class(class, "danger") [
+            s.fg = p.danger
+        ]
+        if has_class(class, "success") [
+            s.fg = p.success
+        ]
+    ]
+    if kind == "icon" [
+        s.size = 20.0
+        s.fg = p.text
+    ]
+    if kind == "container" [
+        if has_class(class, "card") [
+            s.bg = p.surface
+            s.radius = th.radius_lg
+            s.bw = 1.0
+            s.bc = p.border
+            s.pt = 16.0
+            s.pb = 16.0
+            s.pl = 16.0
+            s.pr = 16.0
+            s.sh_blur = 28.0
+            s.sh_dy = 10.0
+            s.sh_color = p.shadow
+        ]
+        if has_class(class, "badge") [
+            s.bg = with_alpha(p.primary, 50)
+            s.fg = p.primary
+            s.radius = 999.0
+            s.pt = 2.0
+            s.pb = 2.0
+            s.pl = 9.0
+            s.pr = 9.0
+            s.size = th.font_sm
+            s.weight = 1
+        ]
+        if has_class(class, "panel") [
+            s.bg = p.surface
+            s.pt = 12.0
+            s.pb = 12.0
+            s.pl = 12.0
+            s.pr = 12.0
+        ]
+        if has_class(class, "glass") [
+            s.bg = rgba(30, 30, 46, 120)
+            s.glass = 26.0
+            s.radius = th.radius_lg
+            s.bw = 1.0
+            s.bc = rgba(255, 255, 255, 40)
+            s.pt = 14.0
+            s.pb = 14.0
+            s.pl = 14.0
+            s.pr = 14.0
+            s.sh_blur = 30.0
+            s.sh_dy = 10.0
+            s.sh_color = rgba(0, 0, 0, 90)
+        ]
+    ]
+    if kind == "row" [
+        s.ay = 1
+    ]
+    if kind == "text_input" [
+        s.pt = 9.0
+        s.pb = 9.0
+        s.pl = 12.0
+        s.pr = 12.0
+        s.radius = th.radius
+        s.bg = p.overlay
+        s.bw = 1.0
+        s.bc = p.border
+        s.w = fill()
+        s.ay = 1
+    ]
+    if kind == "pick_list" [
+        s.pt = 9.0
+        s.pb = 9.0
+        s.pl = 12.0
+        s.pr = 10.0
+        s.radius = th.radius
+        s.bg = p.surface2
+        s.bw = 1.0
+        s.bc = p.border
+        s.ay = 1
+    ]
+    if kind == "checkbox" or kind == "radio" or kind == "toggler" [
+        s.gap = 10.0
+        s.ay = 1
+    ]
+    if kind == "slider" [
+        s.w = fill()
+        s.h = fixed(24.0)
+    ]
+    if kind == "progress" [
+        s.w = fill()
+        s.h = fixed(8.0)
+        s.bg = p.surface3
+        s.radius = 999.0
+        s.fg = p.primary
+    ]
+    if kind == "scrollable" [
+        s.w = fill()
+        s.h = fill()
+        s.clip = 1
+    ]
+    if kind == "rule" [
+        s.bg = p.border
+        s.bc = p.border
+    ]
+    if kind == "tabs" [
+        s.bg = p.overlay
+        s.radius = th.radius
+        s.pt = 3.0
+        s.pb = 3.0
+        s.pl = 3.0
+        s.pr = 3.0
+        s.gap = 2.0
+    ]
+    if kind == "canvas" [
+        s.w = fixed(24.0)
+        s.h = fixed(24.0)
+    ]
+    end s
+]
+
+!! Domyslne kolory stanow: hover/pressed wyliczane z bazowych (CSS `:hover` / `:active` je nadpisuje)
+fun resolve_el(el: Element, c: Ctx, path: Str) -> Element [
+    let e = el.clone()
+    if e.id == "" [
+        e.id = path
+    ]
+    let th = c.theme.clone()
+    let base = widget_style(th.clone(), e.kind.clone(), e.class.clone())
+    let css = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "")
+    let st = style_merge(style_merge(base, css), e.st.clone())
+    e.st = st.clone()
+    let hv = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "hover")
+    let pr = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "active")
+    let fo = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "focus")
+    let amt = 0.07
+    if th.dark [
+        amt = 0.08
+    ]
+    e.hv_bg = st.bg
+    e.hv_fg = st.fg
+    e.hv_bc = st.bc
+    e.pr_bg = st.bg
+    e.pr_fg = st.fg
+    e.pr_bc = st.bc
+    e.hv_sh = st.sh_blur
+    if e.kind == "button" [
+        if col_a(st.bg) > 0 [
+            e.hv_bg = lighten(st.bg, amt)
+            e.pr_bg = darken(st.bg, 0.10)
+        ] else [
+            e.hv_bg = with_alpha(th.p.text, 22)
+            e.pr_bg = with_alpha(th.p.text, 36)
+        ]
+        e.hv_bc = lighten(st.bc, 0.25)
+        e.hv_sh = st.sh_blur + 6.0
+    ]
+    if e.kind == "text_input" or e.kind == "pick_list" [
+        e.hv_bc = lighten(st.bc, 0.35)
+        e.pr_bc = th.p.primary
+        if e.kind == "pick_list" [
+            e.hv_bg = lighten(st.bg, amt)
+        ]
+    ]
+    if hv.bg != UNSET_I [
+        e.hv_bg = hv.bg
+    ]
+    if hv.fg != UNSET_I [
+        e.hv_fg = hv.fg
+    ]
+    if hv.bc != UNSET_I [
+        e.hv_bc = hv.bc
+    ]
+    if hv.sh_blur != UNSET [
+        e.hv_sh = hv.sh_blur
+    ]
+    if pr.bg != UNSET_I [
+        e.pr_bg = pr.bg
+    ]
+    if pr.fg != UNSET_I [
+        e.pr_fg = pr.fg
+    ]
+    if pr.bc != UNSET_I [
+        e.pr_bc = pr.bc
+    ]
+    if fo.bc != UNSET_I [
+        e.pr_bc = fo.bc
+    ]
+    let kids: List<Element> = []
+    let i = 0
+    while i < e.kids.len() [
+        kids.push(resolve_el(e.kids[i].clone(), c.clone(), path + "." + (i as Str)))
+        i = i + 1
+    ]
+    e.kids = kids
+    !! jak w iced: kontener z dzieckiem Fill sam staje sie Fill (inaczej `space().fill_width()` w wierszu nie dziala)
+    if e.kind == "row" or e.kind == "column" or e.kind == "container" or e.kind == "stack" [
+        let fw = false
+        let fh = false
+        let k2 = 0
+        while k2 < kids.len() [
+            if kids[k2].st.w.kind == 2 [
+                fw = true
+            ]
+            if kids[k2].st.h.kind == 2 [
+                fh = true
+            ]
+            k2 = k2 + 1
+        ]
+        if e.st.w.kind == 0 and fw [
+            e.st.w = fill()
+        ]
+        if e.st.h.kind == 0 and fh [
+            e.st.h = fill()
+        ]
+    ]
+    end e
+]
