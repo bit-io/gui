@@ -1,0 +1,107 @@
+get <bit:gui>
+
+struct Shell [
+    tasks: List<TopLevel>,
+    clock: Str,
+    date: Str,
+    battery: Int,
+    apps: List<AppEntry>,
+    query: Str,
+    sel: Int,
+    launcher_open: Bool
+]
+
+fun bar_view(s: Shell, th: Theme) -> Element [
+    let launch = button("Aplikacje").with_icon("layout-grid").on_press("toggle_launcher").class("ghost")
+    let left = row([ launch, taskbar_view(s.tasks.clone(), th) ]).spacing(10.0)
+    let mid = text(s.clock.clone()).bold().size(15.0)
+    let items: List<Element> = [ icon("wifi").size(18.0), icon("volume-2").size(18.0) ]
+    if s.battery >= 0 [
+        items.push(icon("battery").size(18.0))
+        items.push(text((s.battery as Str) + "%").size(13.0))
+    ]
+    let right = row(items).spacing(12.0)
+    let layout = bar_layout(left, mid, right)
+    let e = container(layout)
+    e.class = "glass"
+    end e.padding(0.0).radius(0.0).border(0.0, 0).fill_all()
+]
+
+fun update(s: Shell, m: Message) -> Shell [
+    let n = s.clone()
+    n.tasks = taskbar_update(n.tasks.clone(), m)
+    if m.id == "tick" [
+        n.clock = clock_hm()
+        n.date = clock_date()
+        n.battery = battery_percent()
+    ]
+    if m.id == "toggle_launcher" [
+        n.launcher_open = not n.launcher_open
+        n.query = ""
+        n.sel = 0
+    ]
+    if m.id == "q" [
+        n.query = m.text.clone()
+        n.sel = 0
+    ]
+    if m.id == "run_sel" [
+        let r = apps_filter(n.apps.clone(), n.query.clone())
+        if r.len() > 0 [
+            app_launch(r[n.sel].exec.clone())
+        ]
+        n.launcher_open = false
+    ]
+    if s_starts(m.id.clone(), "run:") [
+        let r = apps_filter(n.apps.clone(), n.query.clone())
+        let i = parse_i(s_sub(m.id.clone(), 4, slen(m.id.clone())))
+        if i < r.len() [
+            app_launch(r[i].exec.clone())
+        ]
+        n.launcher_open = false
+    ]
+    let h = tl_handle_of(m)
+    if h >= 0 [
+        toplevel_action(h, "activate")
+    ]
+    if m.id == "key" and m.text == "Escape" [
+        n.launcher_open = false
+    ]
+    end n
+]
+
+fun main() [
+    let app = app_new_headless_shell()
+    app.set_theme(theme_glass())
+    app.set_tick(1000)
+    let bar = app.open_window("layer", "bar", 0, 40, bar_opts("top", 40, "gui-bar"))
+    if bar < 0 [
+        log("Ten kompozytor nie wspiera wlr-layer-shell (backend: " + app.backend + ")")
+    ]
+    let launcher = -1
+    let demo = gui_env("GUI_SHELL_DEMO") != ""
+    let s = Shell([], clock_hm(), clock_date(), battery_percent(), apps_load(), "", 0, demo)
+    while app.running() [
+        if s.launcher_open and launcher < 0 [
+            launcher = app.open_window("layer", "launcher", 0, 0, overlay_opts("gui-launcher"))
+            app.focus_id(launcher, "@.0.0.0")
+        ]
+        if not s.launcher_open and launcher >= 0 [
+            app.close_window(launcher)
+            launcher = -1
+        ]
+        let uis: List<Element> = []
+        for id in app.window_ids() [
+            if id == launcher [
+                uis.push(launcher_view(s.query.clone(), apps_filter(s.apps.clone(), s.query.clone()), s.sel))
+            ] else [
+                uis.push(bar_view(s.clone(), theme_glass()))
+            ]
+        ]
+        for m in app.frame(uis) [
+            if gui_env("GUI_DEBUG") != "" [
+                log("msg", m.id, m.text, m.win)
+            ]
+            s = update(s.clone(), m)
+        ]
+    ]
+]
