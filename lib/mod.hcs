@@ -1,0 +1,14 @@
+get <bit:gui::native>
+get <bit:gui::fonts>
+get <bit:gui::util>
+get <bit:gui::color>
+get <bit:gui::theme>
+get <bit:gui::element>
+get <bit:gui::css>
+get <bit:gui::resolve>
+get <bit:gui::layout>
+get <bit:gui::render>
+get <bit:gui::app>
+get <bit:gui::shell>
+
+const GUI_VERSION: Str = "0.1"
