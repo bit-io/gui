@@ -1,0 +1,245 @@
+get <bit:gui::native>
+
+const UNSET: Float = -9999.0
+const UNSET_I: Int = -1
+
+fun fmax(a: Float, b: Float) -> Float [
+    if a > b [
+        end a
+    ]
+    end b
+]
+
+fun fmin(a: Float, b: Float) -> Float [
+    if a < b [
+        end a
+    ]
+    end b
+]
+
+fun fclamp(v: Float, lo: Float, hi: Float) -> Float [
+    if v < lo [
+        end lo
+    ]
+    if v > hi [
+        end hi
+    ]
+    end v
+]
+
+fun fabs(v: Float) -> Float [
+    if v < 0.0 [
+        end 0.0 - v
+    ]
+    end v
+]
+
+fun ffloor(v: Float) -> Float [
+    let i = v as Int
+    if (i as Float) > v [
+        i = i - 1
+    ]
+    end i as Float
+]
+
+fun fround(v: Float) -> Float [
+    end ffloor(v + 0.5)
+]
+
+fun lerp(a: Float, b: Float, t: Float) -> Float [
+    end a + (b - a) * t
+]
+
+fun imax(a: Int, b: Int) -> Int [
+    if a > b [
+        end a
+    ]
+    end b
+]
+
+fun imin(a: Int, b: Int) -> Int [
+    if a < b [
+        end a
+    ]
+    end b
+]
+
+fun iclamp(v: Int, lo: Int, hi: Int) -> Int [
+    if v < lo [
+        end lo
+    ]
+    if v > hi [
+        end hi
+    ]
+    end v
+]
+
+!! Float -> tekst z `dec` miejscami po przecinku (do etykiet)
+fun fmt_float(v: Float, dec: Int) -> Str [
+    let neg = v < 0.0
+    let a = fabs(v)
+    let scale = 1.0
+    let k = 0
+    while k < dec [
+        scale = scale * 10.0
+        k = k + 1
+    ]
+    let n = fround(a * scale) as Int
+    let ip = n / (scale as Int)
+    let fp = n % (scale as Int)
+    let s = ip as Str
+    if dec > 0 [
+        let f = fp as Str
+        while f.len() < dec [
+            f = "0" + f
+        ]
+        s = s + "." + f
+    ]
+    if neg and n != 0 [
+        s = "-" + s
+    ]
+    end s
+]
+
+fun pad2(n: Int) -> Str [
+    if n < 10 [
+        end "0" + (n as Str)
+    ]
+    end n as Str
+]
+
+!! Pomocnicze funkcje na tekstach (indeksy w znakach). Typ `Str` musi byc znany kompilatorowi (parametry/let z adnotacja).
+fun s_find(s: Str, needle: Str) -> Int [
+    let n = needle.len()
+    let m = s.len()
+    if n == 0 [
+        end 0
+    ]
+    if n > m [
+        end -1
+    ]
+    let i = 0
+    while i + n <= m [
+        if s.slice(i, i + n) == needle [
+            end i
+        ]
+        i = i + 1
+    ]
+    end -1
+]
+
+fun s_starts(s: Str, p: Str) -> Bool [
+    if p.len() > s.len() [
+        end false
+    ]
+    end s.slice(0, p.len()) == p
+]
+
+fun s_ends(s: Str, p: Str) -> Bool [
+    if p.len() > s.len() [
+        end false
+    ]
+    end s.slice(s.len() - p.len(), s.len()) == p
+]
+
+!! Dlugosc tekstu w ZNAKACH (`.len()` w HackerScript liczy bajty UTF-8)
+fun slen(s: Str) -> Int [
+    end gui_str_len(s)
+]
+
+!! Podzial po pojedynczym znaku (bez logiki nawiasow)
+fun s_split(s: Str, sep: Str) -> List<Str> [
+    let out: List<Str> = []
+    let cur = ""
+    let i = 0
+    let n = slen(s)
+    while i < n [
+        let c = s.char_at(i)
+        if c == sep [
+            out.push(cur)
+            cur = ""
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    out.push(cur)
+    end out
+]
+
+!! Tekst -> Float / Int (bez bledow: zle wejscie daje 0)
+fun parse_f(s: Str) -> Float [
+    let neg = false
+    let i = 0
+    let n = slen(s)
+    if n > 0 and s.char_at(0) == "-" [
+        neg = true
+        i = 1
+    ]
+    let ip = 0.0
+    let fp = 0.0
+    let scale = 0.1
+    let dot = false
+    while i < n [
+        let c = s.char_at(i)
+        if c == "." [
+            dot = true
+        ] else [
+            let d = 0
+            let ok = false
+            let digits = "0123456789"
+            let k = 0
+            while k < 10 [
+                if digits.char_at(k) == c [
+                    d = k
+                    ok = true
+                ]
+                k = k + 1
+            ]
+            if ok [
+                if dot [
+                    fp = fp + (d as Float) * scale
+                    scale = scale / 10.0
+                ] else [
+                    ip = ip * 10.0 + (d as Float)
+                ]
+            ] else [
+                i = n
+            ]
+        ]
+        i = i + 1
+    ]
+    if neg [
+        end 0.0 - (ip + fp)
+    ]
+    end ip + fp
+]
+
+fun parse_i(s: Str) -> Int [
+    end parse_f(s) as Int
+]
+
+fun s_sub(s: Str, a: Int, b: Int) -> Str [
+    end s.slice(a, b)
+]
+
+!! Zamiana wszystkich wystapien `from` na `to` (from niepusty)
+fun s_replace(s: Str, from: Str, to: Str) -> Str [
+    let n = slen(from)
+    if n == 0 [
+        end s
+    ]
+    let out = ""
+    let i = 0
+    let m = slen(s)
+    while i < m [
+        if i + n <= m and s.slice(i, i + n) == from [
+            out = out + to
+            i = i + n
+        ] else [
+            out = out + s.char_at(i)
+            i = i + 1
+        ]
+    ]
+    end out
+]
