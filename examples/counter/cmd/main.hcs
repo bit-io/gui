@@ -1,0 +1,69 @@
+get <bit:gui>
+
+struct State [
+    value: Int,
+    name: Str,
+    volume: Float,
+    dark: Bool
+]
+
+fun update(state: State, m: Message) -> State [
+    let s = state.clone()
+    if m.id == "inc" [
+        s.value = s.value + 1
+    ]
+    if m.id == "dec" [
+        s.value = s.value - 1
+    ]
+    if m.id == "reset" [
+        s.value = 0
+    ]
+    if m.id == "name" [
+        s.name = m.text.clone()
+    ]
+    if m.id == "volume" [
+        s.volume = m.num
+    ]
+    if m.id == "dark" [
+        s.dark = m.flag
+    ]
+    end s
+]
+
+fun view(state: State) -> Element [
+    let greeting = "Cześć!"
+    if state.name != "" [
+        greeting = "Cześć, " + state.name + "!"
+    ]
+    let body = column([
+        heading(greeting),
+        text(state.value as Str).size(56.0).bold(),
+        row([
+            button("−").on_press("dec").width(fixed(52.0)),
+            button("Zeruj").on_press("reset").class("ghost"),
+            button("+").on_press("inc").class("primary").width(fixed(52.0))
+        ]).spacing(10.0),
+        text_input("Twoje imię…", state.name.clone()).on_input("name").width(fixed(260.0)),
+        row([ icon("volume-2"), slider(0.0, 100.0, state.volume).on_change("volume").width(fixed(210.0)) ]).spacing(10.0),
+        toggler("Ciemny motyw", state.dark).on_toggle("dark")
+        ]).spacing(18.0).align_x(1)
+    end container(body).center().padding(24.0)
+]
+
+fun main() [
+    let app = app_new("Licznik", 420, 460)
+    let state = State(0, "", 40.0, true)
+    while app.running() [
+        let before = state.dark
+        for m in app.frame1(view(state.clone())) [
+            state = update(state.clone(), m)
+        ]
+        if state.dark != before [
+            if state.dark [
+                app.set_theme(theme_dark())
+            ] else [
+                app.set_theme(theme_light())
+            ]
+        ]
+    ]
+]
