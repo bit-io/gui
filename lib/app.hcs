@@ -1156,6 +1156,14 @@ impl App [
         if not w.has_last [
             end
         ]
+        !! HWDE: klawisze nawigacyjne trafiaja tez do aplikacji, gdy fokus ma widget (np. pole szukania launchera)
+        if w.focus != "" and (name == "Escape" or name == "ArrowUp" or name == "ArrowDown" or name == "PageUp" or name == "PageDown") [
+            let km = self.mk_msg("key", w.id)
+            km.text = name.clone()
+            km.text2 = text.clone()
+            km.idx = mods
+            out.push(km)
+        ]
         let ctrl = (mods / 2) % 2 == 1
         let shift = mods % 2 == 1
         if name == "Escape" [
