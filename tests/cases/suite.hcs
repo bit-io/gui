@@ -387,6 +387,298 @@ fun t_perf() -> Int [
     end f
 ]
 
+
+!! ------------------------------------------------------------------ nowe: grafika rastrowa
+fun px(win: Int, x: Int, y: Int) -> Int [
+    end gui_pixel(win, x, y)
+]
+
+fun red_of(c: Int) -> Int [
+    end col_r(c)
+]
+
+fun blue_of(c: Int) -> Int [
+    end col_b(c)
+]
+
+fun draw_ui(ui: Element, w: Int, h: Int) -> Int [
+    gui_init("headless")
+    let id = gui_win_create("toplevel", "i", w, h, "")
+    let ctx = Ctx(theme_dark(), sheet_empty(), "", "", "")
+    let sc: Dict<Str, Float> = dict()
+    let b = layout_root(resolve_el(ui, ctx, "r"), w as Float, h as Float, sc)
+    let rc = RCtx(theme_dark(), "", "", "", dict(), dict(), dict(), "", "", false, 0.0, 0.0, w as Float, h as Float, -1)
+    let ops = render_scene(b, rc, rgb(0, 0, 0))
+    gui_win_draw(id, ops.f, ops.s)
+    end id
+]
+
+fun t_image() -> Int [
+    let f = 0
+    log("obrazy rastrowe")
+    gui_fonts_init(font_regular_b64(), font_semibold_b64(), icon_table())
+    gui_image_sync(1)
+    let g = gui_image_gradient(40, 60, rgb(255, 0, 0), rgb(0, 0, 255), 0.0)
+    f = f + check("gradient: id i wymiary", g > 0 and gui_image_width(g) == 40 and gui_image_height(g) == 60 and gui_image_state(g) == 2)
+    f = f + check("zapis PNG", gui_image_save(g, "/tmp/gui_img_t.png") == 0)
+    f = f + check("zapis JPEG", gui_image_save(g, "/tmp/gui_img_t.jpg") == 0)
+    f = f + check("zapis WebP", gui_image_save(g, "/tmp/gui_img_t.webp") == 0)
+    let ip = gui_image_open("/tmp/gui_img_t.png")
+    let ij = gui_image_open("/tmp/gui_img_t.jpg")
+    let iw = gui_image_open("/tmp/gui_img_t.webp")
+    f = f + check("naglowki: PNG/JPEG/WebP 40x60", gui_image_width(ip) == 40 and gui_image_height(ij) == 60 and gui_image_width(iw) == 40)
+    f = f + check("ten sam plik = to samo id (cache)", gui_image_open("/tmp/gui_img_t.png") == ip)
+    f = f + check("dekodowanie PNG/JPEG/WebP", gui_image_load(ip) == 1 and gui_image_load(ij) == 1 and gui_image_load(iw) == 1)
+    f = f + check("brakujacy plik: stan bledu", gui_image_state(gui_image_open("/tmp/nie_ma_takiego.png")) == 3)
+    let st = gui_image_stats()
+    f = f + check("statystyki cache", st[0] >= 4.0 and st[1] >= 4.0 and st[2] > 0.0)
+    gui_image_unload(ip)
+    f = f + check("unload zwalnia pamiec", gui_image_state(ip) == 0)
+    !! fill: lewy brzeg czerwony, prawy niebieski
+    let w1 = draw_ui(image_tex(ip).fit_fill().size_px(100.0, 100.0), 100, 100)
+    f = f + check("odtworzenie po unload przy rysowaniu", gui_image_state(ip) == 2)
+    f = f + check("fill: lewa czerwona", red_of(px(w1, 4, 50)) > 200 and blue_of(px(w1, 4, 50)) < 60)
+    f = f + check("fill: prawa niebieska", blue_of(px(w1, 95, 50)) > 200 and red_of(px(w1, 95, 50)) < 60)
+    let w2 = draw_ui(container(image_tex(g).fit_contain().size_px(200.0, 100.0)).width(fixed(200.0)).height(fixed(100.0)), 200, 100)
+    f = f + check("contain: marginesy to tlo", col_a(px(w2, 5, 50)) > 0 and red_of(px(w2, 5, 50)) < 80 and blue_of(px(w2, 5, 50)) < 90 and red_of(px(w2, 100, 50)) > 100)
+    let w3 = draw_ui(image_tex(g).fit_cover().size_px(200.0, 60.0), 200, 60)
+    f = f + check("cover: wypelnia caly prostokat", red_of(px(w3, 2, 30)) > 150 and blue_of(px(w3, 197, 30)) > 150)
+    let w4 = draw_ui(image_tex(g).fit_fill().radius(30.0).size_px(60.0, 60.0), 60, 60)
+    f = f + check("zaokraglenie: naroze puste", red_of(px(w4, 1, 1)) < 40 and blue_of(px(w4, 1, 1)) < 40 and red_of(px(w4, 30, 30)) > 20)
+    let w5 = draw_ui(image_tex(g).fit_fill().size_px(60.0, 60.0).scale(0.5), 60, 60)
+    f = f + check("transformacja scale(0.5): obraz zmniejszony", blue_of(px(w5, 3, 3)) < 40 and (red_of(px(w5, 30, 30)) > 20 or blue_of(px(w5, 30, 30)) > 20))
+    let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    let ib = gui_image_open_b64("data:image/png;base64," + b64)
+    f = f + check("obraz z base64", ib > 0 and gui_image_width(ib) == 1 and gui_image_load(ib) == 1)
+    !! asynchroniczne dekodowanie w watku roboczym
+    gui_image_sync(0)
+    let ia = gui_image_open("/tmp/gui_img_t.jpg")
+    gui_image_unload(ia)
+    gui_image_prefetch(ia)
+    let got = false
+    let n = 0
+    while n < 200 and not got [
+        for ev in gui_poll(20) [
+            if s_starts(ev, "image\t") and gui_image_state(ia) == 2 [
+                got = true
+            ]
+        ]
+        n = n + 1
+    ]
+    f = f + check("prefetch: zdarzenie image po dekodowaniu w tle", got and gui_image_state(ia) == 2)
+    gui_image_sync(1)
+    end f
+]
+
+!! ------------------------------------------------------------------ nowe: zadania w tle i kolejka komunikatow
+fun t_tasks() -> Int [
+    let f = 0
+    log("zadania w tle, kolejka komunikatow")
+    let app = app_new("t", 200, 100)
+    let ui = column([ text("x") ])
+    let got: List<Message> = []
+    gui_inject_message("hello", "abc\tdef\nghi", "t2", "t3", 2.5, 7, 1)
+    app.task_run("echo", "echo", ["witaj"])
+    app.task_scan("scan", ["/tmp"], [".webp"], 1)
+    app.task_after("later", 30)
+    app.task_http_get("http", "http://127.0.0.1:1/")
+    let k = 0
+    while k < 300 and got.len() < 5 [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+        k = k + 1
+    ]
+    let h = last_msg(got.clone(), "hello")
+    f = f + check("gui_inject_message: pola i tekst z tabulatorem", h.text == "abc\tdef\nghi" and h.text2 == "t2" and near(h.num, 2.5) and h.idx == 7 and h.flag)
+    let e = last_msg(got.clone(), "echo")
+    f = f + check("task_run: stdout i sukces", e.text == "witaj\n" and e.flag and e.idx == 0)
+    let sc = last_msg(got.clone(), "scan")
+    f = f + check("task_scan: znajduje plik .webp", s_find(sc.text, "gui_img_t.webp") >= 0 and sc.idx >= 1)
+    f = f + check("task_after: timer", count_msgs(got.clone(), "later") == 1)
+    let ht = last_msg(got.clone(), "http")
+    f = f + check("task_http: blad polaczenia zwrocony jako Message", count_msgs(got.clone(), "http") == 1 and not ht.flag)
+    gui_task_after("cancelme", 40)
+    f = f + check("anulowanie zadania", gui_task_cancel("cancelme") == 1)
+    let late: List<Message> = []
+    let j = 0
+    while j < 20 [
+        for m in app.frame1(ui.clone()) [
+            late.push(m)
+        ]
+        j = j + 1
+    ]
+    f = f + check("anulowane zadanie nie dostarcza wyniku", count_msgs(late, "cancelme") == 0)
+    end f
+]
+
+!! ------------------------------------------------------------------ nowe: nawigacja przestrzenna, pad, pulapki fokusu
+fun tile(id: Str) -> Element [
+    end container(text(id)).id(id).on_press("pick").size_px(60.0, 40.0).focusable().focus_scale(1.1)
+]
+
+fun grid_ui(modal_open: Bool) -> Element [
+    let r1 = row([ tile("a"), tile("b"), tile("c") ]).spacing(10.0)
+    let r2 = row([ tile("d"), tile("e") ]).spacing(10.0)
+    let main = column([ r1, r2 ]).spacing(10.0).padding(10.0)
+    let inner = column([ button("m1").id("m1").on_press("x"), button("m2").id("m2").on_press("x") ]).spacing(10.0).padding(20.0).background(rgb(40, 40, 60))
+    end stack([ main, modal(inner, modal_open).on_dismiss("close") ]).fill_all()
+]
+
+fun run_frames(app: App, ui: Element, n: Int, got: List<Message>) [
+    app.clear()
+    let i = 0
+    while i < n [
+        for m in app.frame1(ui.clone()) [
+            got.push(m)
+        ]
+        i = i + 1
+    ]
+]
+
+fun t_nav() -> Int [
+    let f = 0
+    log("nawigacja 2D, gamepad, pulapka fokusu, modal")
+    let app = app_new("t", 300, 200)
+    app.set_key_nav(true)
+    let got: List<Message> = []
+    let ui = grid_ui(false)
+    run_frames(app, ui.clone(), 4, got)
+    inject_key("ArrowRight", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("pierwsza strzalka ustawia fokus na pierwszym kafelku", app.focused(1) == "a")
+    inject_key("ArrowRight", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("strzalka w prawo: a -> b", app.focused(1) == "b")
+    inject_key("ArrowDown", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("strzalka w dol: b -> e (pod spodem)", app.focused(1) == "e")
+    inject_key("ArrowRight", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("w prawo z e: najblizszy kandydat na prawo (c)", app.focused(1) == "c")
+    inject_key("ArrowUp", "", 0)
+    inject_key("ArrowRight", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("gora, prawo: e -> b -> c", app.focused(1) == "c")
+    inject_key("ArrowDown", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("c w dol: najblizszy w ostatnim wierszu (e)", app.focused(1) == "e")
+    f = f + check("komunikaty focus", count_msgs(got.clone(), "focus") >= 5 and last_msg(got.clone(), "focus").text == "e")
+    inject_key("Enter", "", 0)
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("Enter aktywuje kafelek", count_msgs(got.clone(), "pick") == 1)
+    !! gamepad: D-pad lewo, przycisk A
+    gui_inject("pad\t0\tconnected\t1\tTest Pad\t1")
+    gui_inject("pad\t0\tbutton\t1\tLeft\t1")
+    gui_inject("pad\t0\tbutton\t1\tLeft\t0")
+    run_frames(app, ui.clone(), 4, got)
+    f = f + check("pad: Left e -> d", app.focused(1) == "d")
+    gui_inject("pad\t0\tbutton\t1\tA\t1")
+    gui_inject("pad\t0\tbutton\t1\tA\t0")
+    run_frames(app, ui.clone(), 4, got)
+    f = f + check("pad: A aktywuje (2 x pick)", count_msgs(got.clone(), "pick") == 2)
+    f = f + check("komunikaty pad_button / pad_connected", count_msgs(got.clone(), "pad_connected") == 1 and count_msgs(got.clone(), "pad_button") >= 4)
+    gui_inject("pad\t0\taxis\t1\tlx\t0.9")
+    run_frames(app, ui.clone(), 3, got)
+    gui_inject("pad\t0\taxis\t1\tlx\t0.0")
+    run_frames(app, ui.clone(), 3, got)
+    f = f + check("pad: lewa galka w prawo przesuwa fokus", app.focused(1) != "d" and count_msgs(got.clone(), "pad_axis") >= 2)
+    !! modal: pulapka fokusu
+    let ui2 = grid_ui(true)
+    run_frames(app, ui2.clone(), 20, got)
+    gui_inject("pad\t0\tbutton\t1\tDown\t1")
+    gui_inject("pad\t0\tbutton\t1\tDown\t0")
+    run_frames(app, ui2.clone(), 4, got)
+    let fm = app.focused(1)
+    f = f + check("modal: fokus zamkniety w modalu", fm == "m1" or fm == "m2")
+    gui_inject("pad\t0\tbutton\t1\tUp\t1")
+    gui_inject("pad\t0\tbutton\t1\tUp\t0")
+    gui_inject("pad\t0\tbutton\t1\tUp\t1")
+    gui_inject("pad\t0\tbutton\t1\tUp\t0")
+    run_frames(app, ui2.clone(), 4, got)
+    f = f + check("modal: strzalka w gore nie ucieka poza modal", app.focused(1) == "m1")
+    gui_inject("pad\t0\tbutton\t1\tB\t1")
+    gui_inject("pad\t0\tbutton\t1\tB\t0")
+    run_frames(app, ui2.clone(), 4, got)
+    f = f + check("modal: B wysyla on_dismiss", count_msgs(got.clone(), "close") == 1)
+    !! scrim: roguy ciemne po animacji
+    let wid = app.wins[0].id
+    f = f + check("modal: scrim przyciemnia tlo", red_of(gui_pixel(wid, 290, 5)) < 20)
+    end f
+]
+
+!! ------------------------------------------------------------------ nowe: wirtualizacja, przewijanie, animacje
+fun t_virtual() -> Int [
+    let f = 0
+    log("wirtualna siatka, przewijanie poziome, animacje")
+    let items: List<Element> = []
+    let i = 0
+    while i < 3000 [
+        items.push(container(text(i as Str)).id("g" + (i as Str)).size_px(100.0, 60.0).background(rgb(60, 60, 90)))
+        i = i + 1
+    ]
+    let ui = virtual_grid(3000, 100.0, 60.0, items).spacing(10.0).padding(10.0).id("vg")
+    let ctx = Ctx(theme_dark(), sheet_empty(), "", "", "")
+    let sc: Dict<Str, Float> = dict()
+    let t0 = gui_now_ms()
+    let b = layout_root(resolve_el(ui, ctx, "r"), 540.0, 400.0, sc)
+    let t1 = gui_now_ms()
+    log("  3000 kafelkow: resolve+layout " + ((t1 - t0) as Str) + " ms, umieszczonych " + (b.kids.len() as Str))
+    f = f + check("tylko widoczne wiersze w drzewie Box", b.kids.len() > 0 and b.kids.len() < 60)
+    f = f + check("kolumny wyliczone z szerokosci", b.cols == 4)
+    f = f + check("wysokosc tresci", near(b.ch, 750.0 * 70.0 - 10.0 + 20.0) or near(b.ch, 750.0 * 70.0 - 10.0))
+    sc.insert("vg", 7000.0)
+    let b2 = layout_root(resolve_el(ui, ctx, "r"), 540.0, 400.0, sc)
+    f = f + check("po przewinieciu: inne kafelki, wciaz niewiele", b2.kids.len() < 60 and b2.kids[0].el.id != b.kids[0].el.id)
+    f = f + check("pozycja kafelka wzgledem przesuniecia", b2.kids[0].y < 400.0 and b2.kids[b2.kids.len() - 1].y > 0.0)
+    !! wirtualna lista z czesciowym zestawem elementow
+    let part: List<Element> = []
+    let k = 100
+    while k < 130 [
+        part.push(container(text("w" + (k as Str))).id("w" + (k as Str)).background(rgb(30, 30, 30)))
+        k = k + 1
+    ]
+    let vl = virtual_scrollable(10000, 30.0, part).first_index(100).id("vl")
+    let sc2: Dict<Str, Float> = dict()
+    sc2.insert("vl", 3000.0)
+    let b3 = layout_root(resolve_el(vl, ctx, "r"), 300.0, 200.0, sc2)
+    f = f + check("virtual_scrollable: element 100 na pozycji 3000", b3.kids.len() > 0 and near(b3.kids[0].y, 0.0 + (3000.0 - 3000.0)) )
+    !! poziome przewijanie
+    let strip: List<Element> = []
+    let q = 0
+    while q < 20 [
+        strip.push(container(text("k")).size_px(80.0, 50.0).id("s" + (q as Str)))
+        q = q + 1
+    ]
+    let hs = scrollable_x(row(strip).spacing(10.0)).id("hs")
+    let sc3: Dict<Str, Float> = dict()
+    sc3.insert("hs", 300.0)
+    let b4 = layout_root(resolve_el(hs, ctx, "r"), 400.0, 100.0, sc3)
+    f = f + check("scrollable_x: szerokosc tresci i przesuniecie", near(b4.cw, 20.0 * 90.0 - 10.0) and near(b4.sc, 300.0) and near(b4.kids[0].x, -300.0))
+    !! animowane przewijanie przez App
+    let app = app_new("t", 400, 300)
+    let vg2 = virtual_grid(500, 100.0, 60.0, items.clone()).spacing(10.0).id("vg")
+    let got: List<Message> = []
+    run_frames(app, vg2.clone(), 4, got)
+    app.scroll_to_item(1, "vg", 200)
+    run_frames(app, vg2.clone(), 120, got)
+    let off = app.scroll_offset(1, "vg")
+    f = f + check("scroll_to_item: animacja dochodzi do celu", off > 2000.0)
+    let r = app.vrange(1, "vg", 500, 100.0, 60.0, 10.0, 0)
+    f = f + check("vrange: zakres obejmuje widoczne", r[0] <= 200 and r[1] > 200 and r[2] >= 3)
+    let tw = app.tween("x", 10.0)
+    f = f + check("tween startuje od celu", near(tw, 10.0))
+    let tw2 = app.tween("x", 50.0)
+    run_frames(app, vg2.clone(), 30, got)
+    f = f + check("tween zbliza sie do celu", app.tween("x", 50.0) > 45.0)
+    !! css transform
+    let sh = css_parse(".z:hover { transform: scale(1.2); } .m { transform: translate(5px, 7px); }")
+    let h = css_apply(sh.clone(), "container", "z", "", "hover")
+    let mm = css_apply(sh, "container", "m", "", "")
+    f = f + check("css transform: scale i translate", near(h.scl * 10.0, 12.0) and near(mm.mvx, 5.0) and near(mm.mvy, 7.0))
+    end f
+]
+
 fun main() [
     let fails = 0
     fails = fails + t_color()
@@ -398,6 +690,10 @@ fun main() [
     fails = fails + t_slider_tabs_pick()
     fails = fails + t_shell()
     fails = fails + t_perf()
+    fails = fails + t_image()
+    fails = fails + t_tasks()
+    fails = fails + t_nav()
+    fails = fails + t_virtual()
     if fails == 0 [
         log("WSZYSTKIE TESTY ZALICZONE")
     ] else [
