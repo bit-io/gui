@@ -1,9 +1,9 @@
-get <bit:gui::util>
-get <bit:gui::color>
-get <bit:gui::theme>
-get <bit:gui::element>
-get <bit:gui::layout>
-get <bit:gui::native>
+include <util>
+include <color>
+include <theme>
+include <element>
+include <layout>
+include <native>
 
 !! --- lista polecen rysowania (Ops) - w tym samym pliku co render, bo kompilator liczy `&mut self` tylko w obrebie pliku
 
@@ -200,6 +200,34 @@ impl Ops [
             ]
         ]
     ]
+    !! obraz: id tekstury, fit 0 fill / 1 cover / 2 contain / 3 none / 4 scale-down, fx/fy zakotwiczenie 0..1
+    pub fun image(self, tex: Int, x: Float, y: Float, w: Float, h: Float, r: Float, fit: Int, alpha: Float, fx: Float, fy: Float) [
+        if tex >= 0 and w > 0.0 and h > 0.0 and alpha > 0.001 [
+            self.f.push(16.0)
+            self.f.push(tex as Float)
+            self.f.push(x)
+            self.f.push(y)
+            self.f.push(w)
+            self.f.push(h)
+            self.f.push(r)
+            self.f.push(fit as Float)
+            self.f.push(alpha)
+            self.f.push(fx)
+            self.f.push(fy)
+        ]
+    ]
+    !! transformacja: skala wokol (cx,cy) + przesuniecie (tx,ty); musi byc zamknieta `endxform`
+    pub fun xform(self, s: Float, cx: Float, cy: Float, tx: Float, ty: Float) [
+        self.f.push(17.0)
+        self.f.push(s)
+        self.f.push(cx)
+        self.f.push(cy)
+        self.f.push(tx)
+        self.f.push(ty)
+    ]
+    pub fun endxform(self) [
+        self.f.push(18.0)
+    ]
     pub fun svg(self, x: Float, y: Float, scale: Float, fill: Int, stroke: Int, sw: Float, d: Str) [
         let si = self.str_idx(d)
         self.f.push(14.0)
@@ -297,6 +325,29 @@ fun shown_text(e: Element) -> Str [
     end e.text.clone()
 ]
 
+fun cur_scale(e: Element, th: Float, tf: Float) -> Float [
+    let sc = e.st.scl
+    if sc == UNSET [
+        sc = 1.0
+    ]
+    if e.hv_scl != UNSET [
+        sc = lerp(sc, e.hv_scl, ease(th))
+    ]
+    if e.fo_scl != UNSET [
+        sc = lerp(sc, e.fo_scl, ease(tf))
+    ]
+    end sc
+]
+
+!! element "wynoszony" nad sasiadow (powiekszany po najechaniu / fokusie)
+fun is_lifted(b: Box, rc: RCtx) -> Bool [
+    let e = b.el.clone()
+    if e.hv_scl == UNSET and e.fo_scl == UNSET [
+        end false
+    ]
+    end av(rc.clone(), "h:" + e.id) > 0.01 or av(rc.clone(), "f:" + e.id) > 0.01
+]
+
 impl Ops [
     pub fun decor(self, b: Box, rc: RCtx) [
         let e = b.el.clone()
@@ -373,6 +424,72 @@ impl Ops [
         self.text(x, base, size, weight, c, t, ls)
     ]
 
+    pub fun draw_modal(self, b: Box, rc: RCtx) [
+        let e = b.el.clone()
+        let t = av(rc.clone(), "t:" + e.id)
+        if t < 0.004 and not e.on [
+            end
+        ]
+        let te = ease(t)
+        self.rrect(b.x, b.y, b.w, b.h, 0.0, with_alpha(rgb(0, 0, 0), (175.0 * te) as Int))
+        if b.kids.len() == 0 [
+            end
+        ]
+        let k = b.kids[0].clone()
+        let layered = te < 0.999
+        if layered [
+            self.layer(te)
+        ]
+        let sc = 1.0
+        let tx = 0.0
+        let ty = 0.0
+        if e.slide == 0 [
+            sc = 0.94 + 0.06 * te
+        ]
+        if e.slide == 1 [
+            tx = (0.0 - (k.w + k.x - b.x)) * (1.0 - te)
+        ]
+        if e.slide == 2 [
+            tx = (b.x + b.w - k.x) * (1.0 - te)
+        ]
+        if e.slide == 3 [
+            ty = (0.0 - (k.h + k.y - b.y)) * (1.0 - te)
+        ]
+        if e.slide == 4 [
+            ty = (b.y + b.h - k.y) * (1.0 - te)
+        ]
+        self.xform(sc, k.x + k.w / 2.0, k.y + k.h / 2.0, tx, ty)
+        self.draw_box(k.clone(), rc.clone())
+        self.endxform()
+        if layered [
+            self.endlayer()
+        ]
+    ]
+
+    pub fun draw_scrollbar(self, b: Box, rc: RCtx) [
+        let e = b.el.clone()
+        let p = rc.theme.p.clone()
+        let th = av(rc.clone(), "h:" + e.id)
+        let sa = 0.25 + 0.5 * fmax(th, av(rc.clone(), "s:" + e.id))
+        if e.axis == 1 [
+            let vw = b.w - pad_w(e.clone())
+            if b.cw > vw + 0.5 [
+                let tw = fmax(24.0, vw * vw / b.cw)
+                let maxs = fmax(1.0, b.cw - vw)
+                let tx = b.x + e.st.pl + (vw - tw) * (b.sc / maxs)
+                self.rrect(tx, b.y + b.h - 7.0, tw, 4.0, 2.0, scale_alpha(p.text, sa * 0.6))
+            ]
+        ] else [
+            let vh = b.h - pad_h(e.clone())
+            if b.ch > vh + 0.5 [
+                let th3 = fmax(24.0, vh * vh / b.ch)
+                let maxs = fmax(1.0, b.ch - vh)
+                let ty = b.y + e.st.pt + (vh - th3) * (b.sc / maxs)
+                self.rrect(b.x + b.w - 7.0, ty, 4.0, th3, 2.0, scale_alpha(p.text, sa * 0.6))
+            ]
+        ]
+    ]
+
     pub fun draw_box(self, b: Box, rc: RCtx) [
         let e = b.el.clone()
         let st = e.st.clone()
@@ -390,12 +507,53 @@ impl Ops [
             self.layer(op)
             layered = true
         ]
+        let xformed = false
+        let csc = cur_scale(e.clone(), th, tf)
+        let mvx = 0.0
+        let mvy = 0.0
+        if st.mvx != UNSET [
+            mvx = st.mvx
+        ]
+        if st.mvy != UNSET [
+            mvy = st.mvy
+        ]
+        if fabs(csc - 1.0) > 0.001 or mvx != 0.0 or mvy != 0.0 [
+            self.xform(csc, b.x + b.w / 2.0, b.y + b.h / 2.0, mvx, mvy)
+            xformed = true
+        ]
+        if e.kind == "modal" [
+            self.draw_modal(b.clone(), rc.clone())
+            if xformed [
+                self.endxform()
+            ]
+            if layered [
+                self.endlayer()
+            ]
+            end
+        ]
         if e.kind != "text" and e.kind != "icon" and e.kind != "checkbox" and e.kind != "radio" and e.kind != "toggler" and e.kind != "slider" and e.kind != "progress" and e.kind != "rule" and e.kind != "space" and e.kind != "canvas" and e.kind != "tabs" [
             self.decor(b.clone(), rc.clone())
         ]
         let fg = mix_state(st.fg, e.hv_fg, th)
         if tp > 0.0 [
             fg = mix(fg, e.pr_fg, tp)
+        ]
+        if e.kind == "image" [
+            let ia = 1.0
+            match rc.anim.fetch("i:" + e.id) [
+                Some(v) -> [
+                    ia = v
+                ]
+                None -> [
+                ]
+            ]
+            self.image(e.img, b.x + st.pl, b.y + st.pt, b.w - pad_w(e.clone()), b.h - pad_h(e.clone()), st.radius, e.fit, ia, e.fx, e.fy)
+            if st.bw > 0.0 [
+                self.stroke(b.x, b.y, b.w, b.h, st.radius, st.bw, mix_state(st.bc, e.hv_bc, th))
+            ]
+        ]
+        if e.focusable and e.ring and e.kind != "button" and tf > 0.01 [
+            self.stroke(b.x - 3.0, b.y - 3.0, b.w + 6.0, b.h + 6.0, st.radius + 3.0, 2.5, scale_alpha(p.primary, tf))
         ]
         if e.kind == "text" [
             self.draw_lines(b.clone(), st.fg)
@@ -593,21 +751,28 @@ impl Ops [
             clipped = true
         ]
         let i = 0
+        let late: List<Int> = []
         while i < b.kids.len() [
-            self.draw_box(b.kids[i].clone(), rc.clone())
+            if is_lifted(b.kids[i].clone(), rc.clone()) [
+                late.push(i)
+            ] else [
+                self.draw_box(b.kids[i].clone(), rc.clone())
+            ]
             i = i + 1
         ]
-        if e.kind == "scrollable" and b.ch > b.h - pad_h(e.clone()) [
-            let vh = b.h - pad_h(e.clone())
-            let ratio = vh / b.ch
-            let th3 = fmax(24.0, vh * ratio)
-            let maxs = fmax(1.0, b.ch - vh)
-            let ty = b.y + st.pt + (vh - th3) * (b.sc / maxs)
-            let sa = 0.25 + 0.5 * fmax(th, av(rc.clone(), "s:" + e.id))
-            self.rrect(b.x + b.w - 7.0, ty, 4.0, th3, 2.0, scale_alpha(p.text, sa * 0.6))
+        let li = 0
+        while li < late.len() [
+            self.draw_box(b.kids[late[li]].clone(), rc.clone())
+            li = li + 1
+        ]
+        if e.kind == "scrollable" or e.kind == "vgrid" [
+            self.draw_scrollbar(b.clone(), rc.clone())
         ]
         if clipped [
             self.unclip()
+        ]
+        if xformed [
+            self.endxform()
         ]
         if layered [
             self.endlayer()
