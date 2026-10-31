@@ -65,10 +65,16 @@ fun main() [
 ## Widgety
 
 `column` `row` `stack` `container` `scrollable` `space` `rule` `text` `icon` `canvas` `button` `button_with` `text_input` (kursor, zaznaczenie, Ctrl+A/C/X/V, słowa, `.secret()`)
-`checkbox` `toggler` `radio` `slider` `progress_bar` `pick_list` (lista rozwijana) `tabs` `tooltip` · gotowe: `card` `badge` `heading` `caption` `vspace` `hspace`.
+`checkbox` `toggler` `radio` `slider` `progress_bar` `pick_list` (lista rozwijana) `tabs` `tooltip` `image` (JPEG/PNG/WebP) `modal` `drawer` `virtual_grid` `virtual_scrollable` `scrollable_x` · gotowe: `card` `badge` `heading` `caption` `vspace` `hspace`.
 Układ jak w iced: `shrink() fixed(px) fill() portion(n)`, `padding` `margin` `spacing` `align_x/align_y` `center`, zawijanie tekstu, przewijanie kółkiem,
 nawigacja klawiaturą (Tab, Enter, Spacja, strzałki), animowane przejścia hover/press/focus.
 Opis wyglądu, motywów i CSS: **docs/STYLING.md**.
+
+## Launchery i aplikacje „konsolowe” (0.2)
+
+![launcher gier](docs/img/launcher-games.png)
+
+Obrazy rastrowe z cache, gamepady (evdev), nawigacja przestrzenna 2D z pułapkami fokusu, wirtualna siatka/lista, zadania w tle (`gui_inject_message`, `task_*`), skalowanie aktywnego kafelka i animowane przewijanie — opis: **docs/LAUNCHER.md**.
 
 ## Powłoka (Wayland)
 
@@ -82,13 +88,14 @@ Opis: **docs/SHELL.md**. Protokoły i status testów: **docs/PROTOCOLS.md**.
 | `examples/counter` | najprostszy program w stylu iced, przełączanie motywu |
 | `examples/todo` | lista zadań: pole z Enter, checkboxy, zakładki, przewijanie |
 | `examples/showcase` | galeria widgetów, karty, gradient, szkło, zmiana motywu, CSS |
+| `examples/launcher` | launcher gier: okładki, siatka 320 pozycji (wirtualna), karuzela, nawigacja padem/strzałkami, modal, szuflada, zadania w tle |
 | `examples/shell` | panel + pasek zadań + zegar + launcher (layer-shell, foreign-toplevel) |
 | `examples/lock` | ekran blokady (ext-session-lock) |
 
 ## Testy
 
 `tests/run.sh` buduje i uruchamia `tests/cases/suite.hcs` w trybie headless (bez kompozytora): kolory, CSS, layout, renderowanie do PNG,
-kliknięcia/pisanie/suwak/zakładki/lista/Tab/przewijanie przez wstrzykiwane zdarzenia, klocki powłoki, pomiar wydajności (60 sprawdzeń).
+kliknięcia/pisanie/suwak/zakładki/lista/Tab/przewijanie przez wstrzykiwane zdarzenia, klocki powłoki, pomiar wydajności (ok. 120 sprawdzeń, w tym obrazy, nawigacja, pad, modal, wirtualizacja i zadania w tle).
 
 ## Znane ograniczenia (HackerScript 0.5 wpływające na API)
 
