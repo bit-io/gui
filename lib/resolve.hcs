@@ -1,8 +1,9 @@
-get <bit:gui::util>
-get <bit:gui::color>
-get <bit:gui::theme>
-get <bit:gui::element>
-get <bit:gui::css>
+include <util>
+include <color>
+include <theme>
+include <element>
+include <css>
+include <native>
 
 struct Ctx [
     theme: Theme,
@@ -261,6 +262,22 @@ fun widget_style(th: Theme, kind: Str, class: Str) -> Style [
         s.w = fixed(24.0)
         s.h = fixed(24.0)
     ]
+    if kind == "image" [
+        s.bg = p.surface2
+        s.radius = th.radius
+        s.clip = 1
+    ]
+    if kind == "modal" [
+        s.w = fill()
+        s.h = fill()
+        s.ax = 1
+        s.ay = 1
+    ]
+    if kind == "vgrid" [
+        s.w = fill()
+        s.h = fill()
+        s.clip = 1
+    ]
     end s
 ]
 
@@ -274,7 +291,17 @@ fun resolve_el(el: Element, c: Ctx, path: Str) -> Element [
     let base = widget_style(th.clone(), e.kind.clone(), e.class.clone())
     let css = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "")
     let st = style_merge(style_merge(base, css), e.st.clone())
+    if e.kind == "scrollable" and e.axis == 1 and el.st.h.kind < 0 and css.h.kind < 0 [
+        st.h = shrink()
+    ]
     e.st = st.clone()
+    if e.kind == "image" and e.img < 0 [
+        if s_starts(e.text.clone(), "data:") or s_starts(e.text.clone(), "base64:") [
+            e.img = gui_image_open_b64(s_replace(e.text.clone(), "base64:", ""))
+        ] else [
+            e.img = gui_image_open(e.text.clone())
+        ]
+    ]
     let hv = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "hover")
     let pr = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "active")
     let fo = css_apply(c.sheet.clone(), e.kind.clone(), e.class.clone(), e.id.clone(), "focus")
@@ -331,10 +358,20 @@ fun resolve_el(el: Element, c: Ctx, path: Str) -> Element [
     if fo.bc != UNSET_I [
         e.pr_bc = fo.bc
     ]
+    if hv.scl != UNSET [
+        e.hv_scl = hv.scl
+    ]
+    if fo.scl != UNSET [
+        e.fo_scl = fo.scl
+    ]
     let kids: List<Element> = []
     let i = 0
+    let base_idx = 0
+    if e.kind == "vgrid" [
+        base_idx = e.first
+    ]
     while i < e.kids.len() [
-        kids.push(resolve_el(e.kids[i].clone(), c.clone(), path + "." + (i as Str)))
+        kids.push(resolve_el(e.kids[i].clone(), c.clone(), path + "." + ((base_idx + i) as Str)))
         i = i + 1
     ]
     e.kids = kids
