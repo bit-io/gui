@@ -6,15 +6,18 @@ get <crates:wayland-protocols-wlr::0.3+client>
 get <crates:rustix::0.38+fs+mm+event+shm+pipe+process>
 get <crates:xkbcommon-dl::0.4>
 get <crates:x11rb::0.13>
+get <crates:image::0.25+jpeg+png+webp>
+get <crates:libc::0.2>
 
 native {Rust} [
 pub mod paint {
+    use super::img;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
     use tiny_skia::{
-        BlendMode, Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType,
-        Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point, RadialGradient, Rect,
+        BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType,
+        Paint, Path, PathBuilder, Pattern, Pixmap, PixmapMut, PixmapPaint, Point, RadialGradient, Rect,
         SpreadMode, Stroke, Transform,
     };
 
@@ -33,6 +36,9 @@ pub mod paint {
     pub const OP_LINE: i64 = 13;
     pub const OP_PATH: i64 = 14;
     pub const OP_CLEAR: i64 = 15;
+    pub const OP_IMAGE: i64 = 16;
+    pub const OP_XFORM: i64 = 17;
+    pub const OP_ENDXFORM: i64 = 18;
 
     pub fn b64_decode(s: &str) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(s.len() * 3 / 4);
@@ -803,7 +809,8 @@ pub mod paint {
             let cg = (color.green() * 255.0) as u32;
             let cb = (color.blue() * 255.0) as u32;
             let ca = (color.alpha() * 255.0) as u32;
-            let clip_data: Option<Vec<u8>> = self.clips.last().map(|m| m.data().to_vec());
+            let top_clip: Option<Mask> = self.clips.pop();
+            let clip_data: Option<&[u8]> = top_clip.as_ref().map(|m| m.data());
             let extra_data: Option<&[u8]> = extra.map(|m| m.data());
             let wrote = self.with_target(|pm, _| {
                 let data = pm.data_mut();
@@ -842,6 +849,9 @@ pub mod paint {
                 }
             });
             let _ = wrote;
+            if let Some(m) = top_clip {
+                self.clips.push(m);
+            }
         }
 
         pub fn shadow(&mut self, x: f32, y: f32, w: f32, h: f32, r: [f32; 4], blur: f32, spread: f32, dx: f32, dy: f32, color: f64, inset: bool) {
@@ -1051,6 +1061,75 @@ pub mod paint {
             }
         }
 
+        /// Rysuje teksture `id` w prostokacie (x,y,w,h). fit: 0 fill, 1 cover, 2 contain, 3 none, 4 scale-down.
+        /// fx/fy: punkt zakotwiczenia 0..1 (0.5 = srodek). Zwraca false, gdy tekstura nie jest jeszcze gotowa.
+        pub fn image(&mut self, id: i64, x: f32, y: f32, w: f32, h: f32, r: f32, fit: i64, alpha: f32, fx: f32, fy: f32) -> bool {
+            if w <= 0.0 || h <= 0.0 {
+                return true;
+            }
+            let tex = match super::img::lookup(id) {
+                Some(t) => t,
+                None => return false,
+            };
+            let (iw, ih) = (tex.w as f32, tex.h as f32);
+            if iw < 1.0 || ih < 1.0 {
+                return true;
+            }
+            let (sx, sy) = match fit {
+                0 => (w / iw, h / ih),
+                1 => {
+                    let k = (w / iw).max(h / ih);
+                    (k, k)
+                }
+                2 => {
+                    let k = (w / iw).min(h / ih);
+                    (k, k)
+                }
+                4 => {
+                    let k = (w / iw).min(h / ih).min(1.0);
+                    (k, k)
+                }
+                _ => (1.0, 1.0),
+            };
+            let (dw, dh) = (iw * sx, ih * sy);
+            let dx = x + (w - dw) * fx.clamp(0.0, 1.0);
+            let dy = y + (h - dh) * fy.clamp(0.0, 1.0);
+            let (vx0, vy0) = (dx.max(x), dy.max(y));
+            let (vx1, vy1) = ((dx + dw).min(x + w), (dy + dh).min(y + h));
+            if vx1 <= vx0 || vy1 <= vy0 {
+                return true;
+            }
+            // poziom mipmapy: najwiekszy, przy ktorym nadal nie powiekszamy obrazu
+            let dev = (sx.max(sy) * self.scale).max(0.0001);
+            let mut lvl = 0usize;
+            while lvl + 1 < tex.mips.len() && dev * ((1usize << (lvl + 1)) as f32) <= 1.0 {
+                lvl += 1;
+            }
+            let pm = &tex.mips[lvl];
+            let (lsx, lsy) = (dw / pm.width() as f32, dh / pm.height() as f32);
+            let ratio = dev * (pm.width() as f32 / iw);
+            let quality = if (lsx * self.scale - 1.0).abs() < 0.001 && (lsy * self.scale - 1.0).abs() < 0.001 {
+                FilterQuality::Nearest
+            } else if ratio > 1.0 {
+                FilterQuality::Bicubic
+            } else {
+                FilterQuality::Bilinear
+            };
+            let pat = Pattern::new(pm.as_ref(), SpreadMode::Pad, quality, alpha.clamp(0.0, 1.0), Transform::from_row(lsx, 0.0, 0.0, lsy, dx, dy));
+            let mut paint = Paint::default();
+            paint.shader = pat;
+            paint.anti_alias = true;
+            let tf = self.tf();
+            if r <= 0.0 {
+                if let Some(rect) = Rect::from_xywh(vx0, vy0, vx1 - vx0, vy1 - vy0) {
+                    self.with_target(|t, clip| t.fill_rect(rect, &paint, tf, clip));
+                }
+            } else if let Some(p) = rrect_path(vx0, vy0, vx1 - vx0, vy1 - vy0, [r; 4]) {
+                self.with_target(|t, clip| t.fill_path(&p, &paint, FillRule::Winding, tf, clip));
+            }
+            true
+        }
+
         pub fn svg_path(&mut self, x: f32, y: f32, scale: f32, fill: f64, stroke: f64, stroke_w: f32, d: &str) {
             if let Some(p) = parse_svg_path(d) {
                 let tf = self.tf().pre_translate(x, y).pre_scale(scale, scale);
@@ -1150,8 +1229,31 @@ pub mod paint {
         v
     }
 
+    /// Transformacja uzywana przy rysowaniu: p' = s * p + (tx, ty) (rownomierna skala + przesuniecie).
+    #[derive(Clone, Copy)]
+    struct Xf {
+        s: f32,
+        tx: f32,
+        ty: f32,
+    }
+
+    impl Xf {
+        fn x(&self, v: f32) -> f32 {
+            v * self.s + self.tx
+        }
+        fn y(&self, v: f32) -> f32 {
+            v * self.s + self.ty
+        }
+        fn l(&self, v: f32) -> f32 {
+            v * self.s
+        }
+    }
+
     pub fn run_ops(buf: &mut [u8], w: u32, h: u32, scale: f32, ops: &Vec<f64>, strs: &Vec<String>) {
         let mut p = Painter::new(buf, w, h, scale);
+        let mut xf = Xf { s: 1.0, tx: 0.0, ty: 0.0 };
+        let mut xstack: Vec<Xf> = Vec::new();
+        img::begin_frame();
         let mut i = 0usize;
         while i < ops.len() {
             let op = ops[i] as i64;
@@ -1165,28 +1267,28 @@ pub mod paint {
                     let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
                     let c = rd(ops, &mut i);
-                    p.rrect(x, y, ww, hh, r, c);
+                    p.rrect(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)), c);
                 }
                 OP_STROKE => {
                     let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
                     let sw = rd(ops, &mut i) as f32;
                     let c = rd(ops, &mut i);
-                    p.stroke_rrect(x, y, ww, hh, r, sw, c);
+                    p.stroke_rrect(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)), xf.l(sw), c);
                 }
                 OP_LGRAD => {
                     let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
                     let ang = rd(ops, &mut i) as f32;
                     let st = rd_stops(ops, &mut i);
-                    p.lgrad(x, y, ww, hh, r, ang, &st);
+                    p.lgrad(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)), ang, &st);
                 }
                 OP_RGRAD => {
                     let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
                     let (fx, fy, rad) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let st = rd_stops(ops, &mut i);
-                    p.rgrad(x, y, ww, hh, r, fx, fy, rad, &st);
+                    p.rgrad(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)), xf.x(fx), xf.y(fy), xf.l(rad), &st);
                 }
                 OP_SHADOW => {
                     let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
@@ -1194,7 +1296,7 @@ pub mod paint {
                     let (bl, sp, dx, dy) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let c = rd(ops, &mut i);
                     let inset = rd(ops, &mut i) > 0.5;
-                    p.shadow(x, y, ww, hh, r, bl, sp, dx, dy, c, inset);
+                    p.shadow(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)), xf.l(bl), xf.l(sp), xf.l(dx), xf.l(dy), c, inset);
                 }
                 OP_TEXT => {
                     let (x, y, size) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
@@ -1203,13 +1305,13 @@ pub mod paint {
                     let si = rd(ops, &mut i) as usize;
                     let ls = rd(ops, &mut i) as f32;
                     if si < strs.len() {
-                        p.text(x, y, size, wt, c, &strs[si], ls);
+                        p.text(xf.x(x), xf.y(y), xf.l(size), wt, c, &strs[si], xf.l(ls));
                     }
                 }
                 OP_CLIP => {
                     let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
                     let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
-                    p.push_clip(x, y, ww, hh, r);
+                    p.push_clip(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)));
                 }
                 OP_UNCLIP => p.pop_clip(),
                 OP_ICON => {
@@ -1218,7 +1320,7 @@ pub mod paint {
                     let sw = rd(ops, &mut i) as f32;
                     let si = rd(ops, &mut i) as usize;
                     if si < strs.len() {
-                        p.icon(x, y, size, c, sw, &strs[si]);
+                        p.icon(xf.x(x), xf.y(y), xf.l(size), c, xf.l(sw), &strs[si]);
                     }
                 }
                 OP_BACKDROP => {
@@ -1226,7 +1328,7 @@ pub mod paint {
                     let r = [rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32];
                     let bl = rd(ops, &mut i) as f32;
                     let tint = rd(ops, &mut i);
-                    p.backdrop(x, y, ww, hh, r, bl, tint);
+                    p.backdrop(xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), r.map(|v| xf.l(v)), xf.l(bl), tint);
                 }
                 OP_LAYER => {
                     let a = rd(ops, &mut i) as f32;
@@ -1238,7 +1340,7 @@ pub mod paint {
                     let wd = rd(ops, &mut i) as f32;
                     let c = rd(ops, &mut i);
                     let cap = rd(ops, &mut i) > 0.5;
-                    p.line(x1, y1, x2, y2, wd, c, cap);
+                    p.line(xf.x(x1), xf.y(y1), xf.x(x2), xf.y(y2), xf.l(wd), c, cap);
                 }
                 OP_PATH => {
                     let (x, y, sc) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
@@ -1247,7 +1349,30 @@ pub mod paint {
                     let sw = rd(ops, &mut i) as f32;
                     let si = rd(ops, &mut i) as usize;
                     if si < strs.len() {
-                        p.svg_path(x, y, sc, fill, stroke, sw, &strs[si]);
+                        p.svg_path(xf.x(x), xf.y(y), xf.l(sc), fill, stroke, xf.l(sw), &strs[si]);
+                    }
+                }
+                // IMAGE id x y w h radius fit alpha fx fy
+                OP_IMAGE => {
+                    let id = rd(ops, &mut i) as i64;
+                    let (x, y, ww, hh) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    let r = rd(ops, &mut i) as f32;
+                    let fit = rd(ops, &mut i) as i64;
+                    let al = rd(ops, &mut i) as f32;
+                    let (fx, fy) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    p.image(id, xf.x(x), xf.y(y), xf.l(ww), xf.l(hh), xf.l(r), fit, al, fx, fy);
+                }
+                // XFORM scale cx cy tx ty: p' = s * (p - c) + c + t, zlozone z biezaca transformacja
+                OP_XFORM => {
+                    let (sc, cx, cy, tx, ty) = (rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32, rd(ops, &mut i) as f32);
+                    xstack.push(xf);
+                    let lx = cx * (1.0 - sc) + tx;
+                    let ly = cy * (1.0 - sc) + ty;
+                    xf = Xf { s: xf.s * sc, tx: xf.s * lx + xf.tx, ty: xf.s * ly + xf.ty };
+                }
+                OP_ENDXFORM => {
+                    if let Some(prev) = xstack.pop() {
+                        xf = prev;
                     }
                 }
                 _ => break,
@@ -2161,9 +2286,13 @@ pub mod wl {
             if self.st.events.is_empty() && wait != 0 {
                 if let Some(guard) = self.queue.prepare_read() {
                     let fd = guard.connection_fd();
-                    let mut pfd = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+                    let wk = super::bg::wake_fd();
+                    let mut pfd = vec![rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+                    if let Some(w) = &wk {
+                        pfd.push(rustix::event::PollFd::new(w, rustix::event::PollFlags::IN));
+                    }
                     let ready = rustix::event::poll(&mut pfd, wait as i32).unwrap_or(0);
-                    if ready > 0 {
+                    if ready > 0 && !pfd[0].revents().is_empty() {
                         let _ = guard.read();
                     } else {
                         drop(guard);
@@ -3403,7 +3532,11 @@ pub mod x11 {
             }
             if self.events.is_empty() && timeout_ms != 0 {
                 let fd = self.conn.stream().as_fd();
-                let mut pfd = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+                let wk = super::bg::wake_fd();
+                let mut pfd = vec![rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+                if let Some(w) = &wk {
+                    pfd.push(rustix::event::PollFd::new(w, rustix::event::PollFlags::IN));
+                }
                 let _ = rustix::event::poll(&mut pfd, timeout_ms as i32);
                 while let Ok(Some(ev)) = self.conn.poll_for_event() {
                     self.handle_event(ev);
@@ -3550,17 +3683,21 @@ pub mod plat {
     }
 
     pub fn gui_poll(timeout_ms: i64) -> Vec<String> {
-        PLAT.with(|p| match &mut *p.borrow_mut() {
-            Some(Backend::Wl(b)) => b.poll(timeout_ms),
-            Some(Backend::X(b)) => b.poll(timeout_ms),
+        let t = if super::bg::pending() { 0 } else { timeout_ms };
+        let mut evs = PLAT.with(|p| match &mut *p.borrow_mut() {
+            Some(Backend::Wl(b)) => b.poll(t),
+            Some(Backend::X(b)) => b.poll(t),
             Some(Backend::Head(hd)) => {
-                if hd.events.is_empty() && timeout_ms != 0 {
+                if hd.events.is_empty() && t != 0 {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 std::mem::take(&mut hd.events)
             }
             None => Vec::new(),
-        })
+        });
+        super::bg::drain_wake();
+        evs.extend(super::bg::take_lines());
+        evs
     }
 
     pub fn gui_inject(ev: String) -> i64 {
@@ -3791,6 +3928,25 @@ pub mod plat {
         })
     }
 
+    /// Test (backend headless): piksel okna jako 0xRRGGBBAA (wspolrzedne w px urzadzenia), -1 poza oknem.
+    pub fn gui_pixel(id: i64, x: i64, y: i64) -> i64 {
+        PLAT.with(|p| match &*p.borrow() {
+            Some(Backend::Head(hd)) => match hd.wins.get(&(id as u32)) {
+                Some(w) => {
+                    let pw = (w.w as f32 * hd.scale) as i64;
+                    let ph = (w.h as f32 * hd.scale) as i64;
+                    if x < 0 || y < 0 || x >= pw || y >= ph {
+                        return -1;
+                    }
+                    let i = ((y * pw + x) * 4) as usize;
+                    ((w.buf[i + 2] as i64) << 24) | ((w.buf[i + 1] as i64) << 16) | ((w.buf[i] as i64) << 8) | (w.buf[i + 3] as i64)
+                }
+                None => -1,
+            },
+            _ => -1,
+        })
+    }
+
     pub fn gui_set_scale(s: f64) -> i64 {
         PLAT.with(|p| {
             if let Some(Backend::Head(hd)) = &mut *p.borrow_mut() {
@@ -3934,5 +4090,1334 @@ pub mod plat {
 
 }
 
+/// Kolejka komunikatow miedzy watkami (inbox), budzenie petli glownej, pula zadan w tle.
+/// Wszystko tu jest bezpieczne watkowo: `gui_inject_message` mozna wolac z dowolnego watku
+/// (rowniez z koroutyn HackerScript), a wynik trafia do `gui_poll` jako zdarzenie `msg`.
+pub mod bg {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::io::Write;
+    use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    pub struct Inbox {
+        lines: VecDeque<String>,
+        payloads: HashMap<u64, Vec<String>>,
+        seq: u64,
+    }
+
+    fn inbox() -> &'static Mutex<Inbox> {
+        static I: OnceLock<Mutex<Inbox>> = OnceLock::new();
+        I.get_or_init(|| Mutex::new(Inbox { lines: VecDeque::new(), payloads: HashMap::new(), seq: 0 }))
+    }
+
+    struct WakePipe {
+        rd: OwnedFd,
+        wr: OwnedFd,
+    }
+
+    fn wake_pipe() -> Option<&'static WakePipe> {
+        static W: OnceLock<Option<WakePipe>> = OnceLock::new();
+        W.get_or_init(|| {
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::NONBLOCK | rustix::pipe::PipeFlags::CLOEXEC)
+                .ok()
+                .map(|(rd, wr)| WakePipe { rd, wr })
+        })
+        .as_ref()
+    }
+
+    /// deskryptor, na ktorym backendy czekaja razem z gniazdem kompozytora / serwera X
+    pub fn wake_fd() -> Option<BorrowedFd<'static>> {
+        wake_pipe().map(|w| w.rd.as_fd())
+    }
+
+    pub fn wake() {
+        if let Some(w) = wake_pipe() {
+            let _ = rustix::io::write(&w.wr, &[1u8]);
+        }
+    }
+
+    pub fn drain_wake() {
+        if let Some(w) = wake_pipe() {
+            let mut b = [0u8; 64];
+            while let Ok(n) = rustix::io::read(&w.rd, &mut b) {
+                if n < b.len() {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn push_line(line: String) {
+        if let Ok(mut g) = inbox().lock() {
+            if g.lines.len() < 100_000 {
+                g.lines.push_back(line);
+            }
+        }
+        wake();
+    }
+
+    pub fn pending() -> bool {
+        match inbox().lock() {
+            Ok(g) => !g.lines.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    pub fn take_lines() -> Vec<String> {
+        match inbox().lock() {
+            Ok(mut g) => g.lines.drain(..).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn clean_id(s: &str) -> String {
+        s.chars().map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c }).collect()
+    }
+
+    pub struct Msg {
+        pub id: String,
+        pub text: String,
+        pub text2: String,
+        pub text3: String,
+        pub num: f64,
+        pub idx: i64,
+        pub flag: bool,
+    }
+
+    pub fn post(m: Msg) {
+        let line;
+        if let Ok(mut g) = inbox().lock() {
+            g.seq += 1;
+            let seq = g.seq;
+            g.payloads.insert(seq, vec![m.text, m.text2, m.text3]);
+            line = format!("msg\t0\t{}\t{}\t{}\t{}\t{}", seq, m.num, m.idx, if m.flag { 1 } else { 0 }, clean_id(&m.id));
+        } else {
+            return;
+        }
+        push_line(line);
+    }
+
+    /// Wstrzykuje komunikat do kolejki petli glownej. Bezpieczne z dowolnego watku.
+    pub fn gui_inject_message(id: String, text: String, text2: String, text3: String, num: f64, idx: i64, flag: i64) -> i64 {
+        post(Msg { id, text, text2, text3, num, idx, flag: flag != 0 });
+        0
+    }
+
+    /// Odbiera (i usuwa) pola tekstowe komunikatu `seq`: `[text, text2, text3]`.
+    pub fn gui_msg_take(seq: i64) -> Vec<String> {
+        match inbox().lock() {
+            Ok(mut g) => g.payloads.remove(&(seq as u64)).unwrap_or_else(|| vec![String::new(), String::new(), String::new()]),
+            Err(_) => vec![String::new(), String::new(), String::new()],
+        }
+    }
+
+    pub fn gui_wake() -> i64 {
+        wake();
+        0
+    }
+
+    // ------------------------------------------------------------------ pula watkow
+    pub type Job = Box<dyn FnOnce() + Send + 'static>;
+
+    pub struct Queue {
+        q: Mutex<VecDeque<Job>>,
+        cv: Condvar,
+    }
+
+    pub fn make_pool(n: usize, name: &str) -> Arc<Queue> {
+        let q = Arc::new(Queue { q: Mutex::new(VecDeque::new()), cv: Condvar::new() });
+        for k in 0..n.max(1) {
+            let qq = q.clone();
+            let _ = std::thread::Builder::new().name(format!("{}-{}", name, k)).spawn(move || loop {
+                let job: Job = {
+                    let mut g = match qq.q.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    loop {
+                        if let Some(j) = g.pop_front() {
+                            break j;
+                        }
+                        g = match qq.cv.wait(g) {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                    }
+                };
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            });
+        }
+        q
+    }
+
+    pub fn submit(q: &Arc<Queue>, job: Job) {
+        if let Ok(mut g) = q.q.lock() {
+            g.push_back(job);
+        }
+        q.cv.notify_one();
+    }
+
+    struct TaskState {
+        live: HashMap<String, u32>,
+        cancelled: HashSet<String>,
+    }
+
+    fn tstate() -> &'static Mutex<TaskState> {
+        static T: OnceLock<Mutex<TaskState>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(TaskState { live: HashMap::new(), cancelled: HashSet::new() }))
+    }
+
+    static PENDING: AtomicI64 = AtomicI64::new(0);
+
+    fn task_pool() -> &'static Arc<Queue> {
+        static P: OnceLock<Arc<Queue>> = OnceLock::new();
+        P.get_or_init(|| make_pool(4, "gui-task"))
+    }
+
+    fn is_cancelled(id: &str) -> bool {
+        match tstate().lock() {
+            Ok(g) => g.cancelled.contains(id),
+            Err(_) => false,
+        }
+    }
+
+    fn task_begin(id: &str) {
+        PENDING.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut g) = tstate().lock() {
+            *g.live.entry(id.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    fn task_end(id: &str) {
+        PENDING.fetch_sub(1, Ordering::SeqCst);
+        if let Ok(mut g) = tstate().lock() {
+            let mut gone = false;
+            if let Some(c) = g.live.get_mut(id) {
+                *c -= 1;
+                gone = *c == 0;
+            }
+            if gone {
+                g.live.remove(id);
+                g.cancelled.remove(id);
+            }
+        }
+    }
+
+    /// Uruchamia `f` w puli; wynik (jesli zadanie nie zostalo anulowane) trafia do kolejki jako Message.
+    fn spawn_task<F: FnOnce() -> Msg + Send + 'static>(id: String, f: F) {
+        task_begin(&id);
+        let id2 = id.clone();
+        submit(
+            task_pool(),
+            Box::new(move || {
+                if is_cancelled(&id2) {
+                    task_end(&id2);
+                    return;
+                }
+                let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| Msg {
+                    id: id2.clone(),
+                    text: String::new(),
+                    text2: "panic w zadaniu".to_string(),
+                    text3: String::new(),
+                    num: 0.0,
+                    idx: -1,
+                    flag: false,
+                });
+                if !is_cancelled(&id2) {
+                    post(m);
+                }
+                task_end(&id2);
+            }),
+        );
+    }
+
+    fn msg_of(id: &str, text: String, text2: String, num: f64, idx: i64, flag: bool) -> Msg {
+        Msg { id: id.to_string(), text, text2, text3: String::new(), num, idx, flag }
+    }
+
+    /// Uruchamia program w tle. Wynik: text = stdout, text2 = stderr, idx = kod wyjscia, flag = sukces, num = czas [s].
+    pub fn gui_task_run(id: String, cmd: String, args: Vec<String>) -> i64 {
+        let id2 = id.clone();
+        spawn_task(id, move || {
+            let t0 = Instant::now();
+            match std::process::Command::new(&cmd).args(&args).stdin(std::process::Stdio::null()).output() {
+                Ok(o) => msg_of(
+                    &id2,
+                    String::from_utf8_lossy(&o.stdout).to_string(),
+                    String::from_utf8_lossy(&o.stderr).to_string(),
+                    t0.elapsed().as_secs_f64(),
+                    o.status.code().unwrap_or(-1) as i64,
+                    o.status.success(),
+                ),
+                Err(e) => msg_of(&id2, String::new(), e.to_string(), t0.elapsed().as_secs_f64(), -1, false),
+            }
+        });
+        0
+    }
+
+    /// Zapytanie HTTP w tle (przez `curl`, bez ciezkich zaleznosci TLS). `headers`: wiersze `Nazwa: wartosc`.
+    /// Wynik: text = tresc odpowiedzi, text2 = blad, idx = kod HTTP, flag = 2xx.
+    pub fn gui_task_http(id: String, method: String, url: String, headers: Vec<String>, body: String, timeout_s: i64) -> i64 {
+        let id2 = id.clone();
+        spawn_task(id, move || {
+            let t0 = Instant::now();
+            let mut c = std::process::Command::new("curl");
+            c.arg("-sS").arg("-L").arg("--max-time").arg(timeout_s.max(1).to_string());
+            c.arg("-A").arg("gui-launcher/0.2");
+            let m = if method.is_empty() { "GET".to_string() } else { method.to_uppercase() };
+            c.arg("-X").arg(&m);
+            for h in &headers {
+                c.arg("-H").arg(h);
+            }
+            let has_body = !body.is_empty();
+            if has_body {
+                c.arg("--data-binary").arg("@-");
+            }
+            c.arg("-w").arg("\n%{http_code}").arg(&url);
+            c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            c.stdin(if has_body { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+            let mut child = match c.spawn() {
+                Ok(ch) => ch,
+                Err(e) => return msg_of(&id2, String::new(), format!("curl: {}", e), 0.0, -1, false),
+            };
+            if has_body {
+                if let Some(mut si) = child.stdin.take() {
+                    let _ = si.write_all(body.as_bytes());
+                }
+            }
+            match child.wait_with_output() {
+                Ok(o) => {
+                    let out = o.stdout;
+                    let (text, code) = match out.iter().rposition(|b| *b == b'\n') {
+                        Some(p) => (
+                            String::from_utf8_lossy(&out[..p]).to_string(),
+                            String::from_utf8_lossy(&out[p + 1..]).trim().parse::<i64>().unwrap_or(0),
+                        ),
+                        None => (String::from_utf8_lossy(&out).to_string(), 0),
+                    };
+                    msg_of(&id2, text, String::from_utf8_lossy(&o.stderr).to_string(), t0.elapsed().as_secs_f64(), code, code >= 200 && code < 300)
+                }
+                Err(e) => msg_of(&id2, String::new(), e.to_string(), t0.elapsed().as_secs_f64(), -1, false),
+            }
+        });
+        0
+    }
+
+    /// Rekurencyjne skanowanie katalogow w tle. `suffixes`: koncowki nazw plikow (np. `.acf`, `.desktop`; puste = wszystkie).
+    /// Wynik: text = sciezki rozdzielone znakiem nowej linii, idx = liczba plikow, flag = true.
+    pub fn gui_task_scan(id: String, roots: Vec<String>, suffixes: Vec<String>, depth: i64) -> i64 {
+        let id2 = id.clone();
+        spawn_task(id, move || {
+            let t0 = Instant::now();
+            let suf: Vec<String> = suffixes.iter().map(|s| s.to_lowercase()).collect();
+            let mut found: Vec<String> = Vec::new();
+            let mut stack: Vec<(std::path::PathBuf, i64)> = roots.iter().map(|r| (std::path::PathBuf::from(r), 0)).collect();
+            while let Some((dir, d)) = stack.pop() {
+                if is_cancelled(&id2) || found.len() >= 200_000 {
+                    break;
+                }
+                let rd = match std::fs::read_dir(&dir) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                for ent in rd.flatten() {
+                    let ft = match ent.file_type() {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let p = ent.path();
+                    if ft.is_dir() {
+                        if depth < 0 || d < depth {
+                            stack.push((p, d + 1));
+                        }
+                    } else {
+                        let name = ent.file_name().to_string_lossy().to_lowercase();
+                        if suf.is_empty() || suf.iter().any(|s| name.ends_with(s.as_str())) {
+                            found.push(p.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            found.sort();
+            let n = found.len() as i64;
+            msg_of(&id2, found.join("\n"), String::new(), t0.elapsed().as_secs_f64(), n, true)
+        });
+        0
+    }
+
+    /// Czyta plik tekstowy w tle (do 16 MB). Wynik: text = zawartosc, flag = czy sie udalo.
+    pub fn gui_task_read(id: String, path: String) -> i64 {
+        let id2 = id.clone();
+        spawn_task(id, move || {
+            let t0 = Instant::now();
+            match std::fs::read(&path) {
+                Ok(mut b) => {
+                    b.truncate(16 * 1024 * 1024);
+                    msg_of(&id2, String::from_utf8_lossy(&b).to_string(), String::new(), t0.elapsed().as_secs_f64(), b.len() as i64, true)
+                }
+                Err(e) => msg_of(&id2, String::new(), e.to_string(), t0.elapsed().as_secs_f64(), -1, false),
+            }
+        });
+        0
+    }
+
+    /// Zapisuje plik w tle (np. pobrana okladka / cache). Wynik: flag = sukces.
+    pub fn gui_task_write(id: String, path: String, data: String) -> i64 {
+        let id2 = id.clone();
+        spawn_task(id, move || match std::fs::write(&path, data.as_bytes()) {
+            Ok(_) => msg_of(&id2, path.clone(), String::new(), 0.0, data.len() as i64, true),
+            Err(e) => msg_of(&id2, path.clone(), e.to_string(), 0.0, -1, false),
+        });
+        0
+    }
+
+    /// Komunikat po `ms` milisekundach (timer / debounce); nie zajmuje watku puli.
+    pub fn gui_task_after(id: String, ms: i64) -> i64 {
+        task_begin(&id);
+        let id2 = id.clone();
+        let _ = std::thread::Builder::new().name("gui-timer".to_string()).spawn(move || {
+            std::thread::sleep(Duration::from_millis(ms.max(0) as u64));
+            if !is_cancelled(&id2) {
+                post(msg_of(&id2, String::new(), String::new(), ms as f64, 0, true));
+            }
+            task_end(&id2);
+        });
+        0
+    }
+
+    /// Anuluje zadania o danym `id` (te, ktore jeszcze nie zakonczyly sie, nie dostarcza wyniku).
+    pub fn gui_task_cancel(id: String) -> i64 {
+        if let Ok(mut g) = tstate().lock() {
+            if g.live.contains_key(&id) {
+                g.cancelled.insert(id);
+                return 1;
+            }
+        }
+        0
+    }
+
+    /// Liczba zadan w toku (w kolejce lub wykonywanych).
+    pub fn gui_task_pending() -> i64 {
+        PENDING.load(Ordering::SeqCst)
+    }
+}
+
+/// Tekstury rastrowe: dekodowanie (JPEG/PNG/WebP) w watkach roboczych, cache z limitem pamieci (LRU),
+/// mipmapy do ostrego skalowania w dol. Identyfikatory (`i64`) sa stabilne, a rysowanie to `OP_IMAGE`.
+pub mod img {
+    use super::bg;
+    use std::collections::HashMap;
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tiny_skia::{IntSize, Pixmap};
+
+    pub struct Tex {
+        pub w: u32,
+        pub h: u32,
+        pub mips: Vec<Pixmap>,
+        pub bytes: usize,
+    }
+
+    #[derive(Clone)]
+    pub enum Src {
+        Path(String),
+        Bytes(Arc<Vec<u8>>),
+        Mem,
+    }
+
+    pub struct Entry {
+        src: Src,
+        w: u32,
+        h: u32,
+        // 0 niezaladowana, 1 w trakcie, 2 gotowa, 3 blad
+        state: u8,
+        tex: Option<Arc<Tex>>,
+        last_used: u64,
+        failed_ms: u64,
+    }
+
+    pub struct Store {
+        map: HashMap<i64, Entry>,
+        keys: HashMap<String, i64>,
+        next: i64,
+        bytes: usize,
+        budget: usize,
+        tick: u64,
+        sync: bool,
+        max_dim: u32,
+        loads: u64,
+    }
+
+    fn store() -> &'static Mutex<Store> {
+        static S: OnceLock<Mutex<Store>> = OnceLock::new();
+        S.get_or_init(|| {
+            let sync = std::env::var("GUI_IMAGE_SYNC").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
+            Mutex::new(Store { map: HashMap::new(), keys: HashMap::new(), next: 1, bytes: 0, budget: 256 * 1024 * 1024, tick: 0, sync, max_dim: 4096, loads: 0 })
+        })
+    }
+
+    fn pool() -> &'static Arc<bg::Queue> {
+        static P: OnceLock<Arc<bg::Queue>> = OnceLock::new();
+        P.get_or_init(|| {
+            let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+            bg::make_pool(n.saturating_sub(1).max(1).min(4), "gui-img")
+        })
+    }
+
+    fn now_ms() -> u64 {
+        static T0: OnceLock<std::time::Instant> = OnceLock::new();
+        T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+    }
+
+    fn fnv(data: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in data {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    /// RGBA (nieprzemnozone) -> przemnozone, z zamiana R<->B (bufor jest BGRA), plus lancuch mipmap.
+    fn build_tex(mut rgba: image::RgbaImage, max_dim: u32) -> Option<Tex> {
+        let (mut w, mut h) = rgba.dimensions();
+        if w == 0 || h == 0 {
+            return None;
+        }
+        if w.max(h) > max_dim {
+            let k = max_dim as f32 / w.max(h) as f32;
+            let nw = ((w as f32 * k).round() as u32).max(1);
+            let nh = ((h as f32 * k).round() as u32).max(1);
+            rgba = image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Triangle);
+            w = nw;
+            h = nh;
+        }
+        let mut data = rgba.into_raw();
+        for px in data.chunks_exact_mut(4) {
+            let a = px[3] as u32;
+            let (mut r, mut g, mut b) = (px[0] as u32, px[1] as u32, px[2] as u32);
+            if a != 255 {
+                r = (r * a + 127) / 255;
+                g = (g * a + 127) / 255;
+                b = (b * a + 127) / 255;
+            }
+            px[0] = b as u8;
+            px[1] = g as u8;
+            px[2] = r as u8;
+        }
+        let mut mips: Vec<Pixmap> = Vec::new();
+        mips.push(Pixmap::from_vec(data, IntSize::from_wh(w, h)?)?);
+        loop {
+            let (nw, nh, nd) = {
+                let last = mips.last()?;
+                let (lw, lh) = (last.width(), last.height());
+                if lw.min(lh) < 32 || mips.len() >= 8 {
+                    break;
+                }
+                let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
+                let src = last.data();
+                let mut nd = vec![0u8; (nw * nh * 4) as usize];
+                for y in 0..nh {
+                    for x in 0..nw {
+                        let (x0, y0) = (x * 2, y * 2);
+                        let (x1, y1) = ((x0 + 1).min(lw - 1), (y0 + 1).min(lh - 1));
+                        for c in 0..4usize {
+                            let s = src[((y0 * lw + x0) * 4) as usize + c] as u32
+                                + src[((y0 * lw + x1) * 4) as usize + c] as u32
+                                + src[((y1 * lw + x0) * 4) as usize + c] as u32
+                                + src[((y1 * lw + x1) * 4) as usize + c] as u32;
+                            nd[((y * nw + x) * 4) as usize + c] = ((s + 2) / 4) as u8;
+                        }
+                    }
+                }
+                (nw, nh, nd)
+            };
+            mips.push(Pixmap::from_vec(nd, IntSize::from_wh(nw, nh)?)?);
+        }
+        let bytes = mips.iter().map(|m| m.data().len()).sum();
+        Some(Tex { w, h, mips, bytes })
+    }
+
+    fn decode(src: &Src, max_dim: u32) -> Option<Tex> {
+        let dynimg = match src {
+            Src::Path(p) => image::ImageReader::open(p).ok()?.with_guessed_format().ok()?.decode().ok()?,
+            Src::Bytes(b) => image::load_from_memory(b).ok()?,
+            Src::Mem => return None,
+        };
+        build_tex(dynimg.to_rgba8(), max_dim)
+    }
+
+    fn evict(st: &mut Store) {
+        while st.bytes > st.budget {
+            let tick = st.tick;
+            let mut best: Option<(i64, u64)> = None;
+            for (id, e) in st.map.iter() {
+                if e.state == 2 && !matches!(e.src, Src::Mem) && e.last_used + 2 < tick {
+                    if best.map(|b| e.last_used < b.1).unwrap_or(true) {
+                        best = Some((*id, e.last_used));
+                    }
+                }
+            }
+            match best {
+                Some((id, _)) => {
+                    let mut freed = 0usize;
+                    if let Some(e) = st.map.get_mut(&id) {
+                        if let Some(t) = e.tex.take() {
+                            freed = t.bytes;
+                        }
+                        e.state = 0;
+                    }
+                    st.bytes = st.bytes.saturating_sub(freed);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn finish(id: i64, tex: Option<Tex>) {
+        let ok = tex.is_some();
+        if let Ok(mut st) = store().lock() {
+            let mut add = 0usize;
+            if let Some(e) = st.map.get_mut(&id) {
+                match tex {
+                    Some(t) => {
+                        add = t.bytes;
+                        e.w = t.w;
+                        e.h = t.h;
+                        e.tex = Some(Arc::new(t));
+                        e.state = 2;
+                    }
+                    None => {
+                        e.state = 3;
+                        e.failed_ms = now_ms();
+                    }
+                }
+            }
+            st.bytes += add;
+            st.loads += 1;
+            evict(&mut st);
+        }
+        bg::push_line(format!("image\t0\t{}\t{}", id, if ok { 1 } else { 0 }));
+    }
+
+    fn start_load(id: i64, src: Src, max_dim: u32) {
+        bg::submit(
+            pool(),
+            Box::new(move || {
+                let t = decode(&src, max_dim);
+                finish(id, t);
+            }),
+        );
+    }
+
+    pub fn begin_frame() {
+        if let Ok(mut st) = store().lock() {
+            st.tick += 1;
+        }
+    }
+
+    /// Dla Painter: gotowa tekstura albo `None` (wtedy zlecane jest ladowanie w tle).
+    pub fn lookup(id: i64) -> Option<Arc<Tex>> {
+        let mut st = store().lock().ok()?;
+        let tick = st.tick;
+        let max_dim = st.max_dim;
+        let sync = st.sync;
+        let (state, src) = {
+            let e = st.map.get_mut(&id)?;
+            e.last_used = tick;
+            (e.state, e.src.clone())
+        };
+        match state {
+            2 => st.map.get(&id).and_then(|e| e.tex.clone()),
+            0 => {
+                if sync {
+                    drop(st);
+                    let t = decode(&src, max_dim);
+                    finish(id, t);
+                    let st2 = store().lock().ok()?;
+                    return st2.map.get(&id).and_then(|e| e.tex.clone());
+                }
+                if let Some(e) = st.map.get_mut(&id) {
+                    e.state = 1;
+                }
+                drop(st);
+                start_load(id, src, max_dim);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn insert(st: &mut Store, key: String, src: Src, w: u32, h: u32, state: u8) -> i64 {
+        let id = st.next;
+        st.next += 1;
+        let failed_ms = if state == 3 { now_ms() } else { 0 };
+        let tick = st.tick;
+        st.map.insert(id, Entry { src, w, h, state, tex: None, last_used: tick, failed_ms });
+        if !key.is_empty() {
+            st.keys.insert(key, id);
+        }
+        id
+    }
+
+    // ------------------------------------------------------------------ API dla HackerScript
+    /// Rejestruje obraz z pliku (czyta tylko naglowek). Zwraca id; dla brakujacego pliku id obrazu w stanie 3
+    /// (ponowna proba co 2 s, wiec obraz pojawi sie, gdy plik zostanie pobrany).
+    pub fn gui_image_open(path: String) -> i64 {
+        if path.is_empty() {
+            return -1;
+        }
+        let key = format!("p:{}", path);
+        let mut st = match store().lock() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        if let Some(id) = st.keys.get(&key).copied() {
+            let retry = match st.map.get(&id) {
+                Some(e) => e.state == 3 && now_ms().saturating_sub(e.failed_ms) > 2000,
+                None => false,
+            };
+            if retry {
+                match image::image_dimensions(&path) {
+                    Ok((w, h)) => {
+                        if let Some(e) = st.map.get_mut(&id) {
+                            e.w = w;
+                            e.h = h;
+                            e.state = 0;
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(e) = st.map.get_mut(&id) {
+                            e.failed_ms = now_ms();
+                        }
+                    }
+                }
+            }
+            return id;
+        }
+        match image::image_dimensions(&path) {
+            Ok((w, h)) => insert(&mut st, key, Src::Path(path), w, h, 0),
+            Err(_) => insert(&mut st, key, Src::Path(path), 0, 0, 3),
+        }
+    }
+
+    /// Obraz z pamieci: dane w base64 (opcjonalnie z prefiksem `data:...;base64,`).
+    pub fn gui_image_open_b64(data: String) -> i64 {
+        let body = if data.starts_with("data:") {
+            match data.find(',') {
+                Some(p) => data[p + 1..].to_string(),
+                None => return -1,
+            }
+        } else {
+            data
+        };
+        let bytes = super::paint::b64_decode(&body);
+        if bytes.is_empty() {
+            return -1;
+        }
+        let key = format!("b:{:x}:{}", fnv(&bytes), bytes.len());
+        let mut st = match store().lock() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        if let Some(id) = st.keys.get(&key).copied() {
+            return id;
+        }
+        let dims = image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok());
+        match dims {
+            Some((w, h)) => insert(&mut st, key, Src::Bytes(Arc::new(bytes)), w, h, 0),
+            None => insert(&mut st, key, Src::Mem, 0, 0, 3),
+        }
+    }
+
+    /// Tekstura wygenerowana: gradient liniowy c1 -> c2 (kolory 0xRRGGBBAA), kat w stopniach (0 = od lewej do prawej, 90 = z gory na dol).
+    pub fn gui_image_gradient(w: i64, h: i64, c1: i64, c2: i64, angle: f64) -> i64 {
+        let (w, h) = (w.clamp(1, 4096) as u32, h.clamp(1, 4096) as u32);
+        let (dx, dy) = ((angle.to_radians().cos()) as f32, (angle.to_radians().sin()) as f32);
+        let ch = |c: i64, sh: u32| -> f32 { ((c as u32 >> sh) & 255) as f32 };
+        let proj = |x: f32, y: f32| x * dx + y * dy;
+        let corners = [proj(0.0, 0.0), proj(w as f32, 0.0), proj(0.0, h as f32), proj(w as f32, h as f32)];
+        let lo = corners.iter().cloned().fold(f32::MAX, f32::min);
+        let hi = corners.iter().cloned().fold(f32::MIN, f32::max);
+        let span = (hi - lo).max(0.0001);
+        let rgba = image::RgbaImage::from_fn(w, h, |x, y| {
+            let t = ((proj(x as f32 + 0.5, y as f32 + 0.5) - lo) / span).clamp(0.0, 1.0);
+            let mix = |sh: u32| -> u8 { (ch(c1, sh) + (ch(c2, sh) - ch(c1, sh)) * t).round().clamp(0.0, 255.0) as u8 };
+            image::Rgba([mix(24), mix(16), mix(8), mix(0)])
+        });
+        let tex = match build_tex(rgba, 4096) {
+            Some(t) => t,
+            None => return -1,
+        };
+        let mut st = match store().lock() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let id = insert(&mut st, String::new(), Src::Mem, w, h, 2);
+        st.bytes += tex.bytes;
+        if let Some(e) = st.map.get_mut(&id) {
+            e.tex = Some(Arc::new(tex));
+        }
+        id
+    }
+
+    /// Dekoduje synchronicznie (blokuje). 1 = gotowe, 0 = blad.
+    pub fn gui_image_load(id: i64) -> i64 {
+        let (src, max_dim, state) = {
+            let st = match store().lock() {
+                Ok(s) => s,
+                Err(_) => return 0,
+            };
+            match st.map.get(&id) {
+                Some(e) => (e.src.clone(), st.max_dim, e.state),
+                None => return 0,
+            }
+        };
+        if state == 2 {
+            return 1;
+        }
+        let t = decode(&src, max_dim);
+        let ok = t.is_some();
+        finish(id, t);
+        if ok { 1 } else { 0 }
+    }
+
+    /// Zleca dekodowanie w tle (po zakonczeniu przychodzi zdarzenie `image`). 1 = zlecone lub juz gotowe.
+    pub fn gui_image_prefetch(id: i64) -> i64 {
+        let (src, max_dim) = {
+            let mut st = match store().lock() {
+                Ok(s) => s,
+                Err(_) => return 0,
+            };
+            let max_dim = st.max_dim;
+            match st.map.get_mut(&id) {
+                Some(e) => {
+                    if e.state == 2 || e.state == 1 {
+                        return 1;
+                    }
+                    if e.state == 3 && matches!(e.src, Src::Mem) {
+                        return 0;
+                    }
+                    e.state = 1;
+                    (e.src.clone(), max_dim)
+                }
+                None => return 0,
+            }
+        };
+        start_load(id, src, max_dim);
+        1
+    }
+
+    /// 0 niezaladowana, 1 w trakcie, 2 gotowa, 3 blad, -1 nieznane id
+    pub fn gui_image_state(id: i64) -> i64 {
+        match store().lock() {
+            Ok(st) => st.map.get(&id).map(|e| e.state as i64).unwrap_or(-1),
+            Err(_) => -1,
+        }
+    }
+
+    pub fn gui_image_width(id: i64) -> i64 {
+        match store().lock() {
+            Ok(st) => st.map.get(&id).map(|e| e.w as i64).unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    pub fn gui_image_height(id: i64) -> i64 {
+        match store().lock() {
+            Ok(st) => st.map.get(&id).map(|e| e.h as i64).unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    pub fn gui_image_free(id: i64) -> i64 {
+        if let Ok(mut st) = store().lock() {
+            if let Some(e) = st.map.remove(&id) {
+                if let Some(t) = e.tex {
+                    st.bytes = st.bytes.saturating_sub(t.bytes);
+                }
+                st.keys.retain(|_, v| *v != id);
+                return 1;
+            }
+        }
+        0
+    }
+
+    /// Zwalnia zdekodowana pamiec (obraz zostanie zdekodowany ponownie, gdy bedzie potrzebny).
+    pub fn gui_image_unload(id: i64) -> i64 {
+        if let Ok(mut st) = store().lock() {
+            let mut freed = 0usize;
+            if let Some(e) = st.map.get_mut(&id) {
+                if !matches!(e.src, Src::Mem) && e.state == 2 {
+                    if let Some(t) = e.tex.take() {
+                        freed = t.bytes;
+                    }
+                    e.state = 0;
+                }
+            }
+            st.bytes = st.bytes.saturating_sub(freed);
+            return if freed > 0 { 1 } else { 0 };
+        }
+        0
+    }
+
+    /// Wymusza ponowne wczytanie pliku (np. po podmianie okladki na dysku).
+    pub fn gui_image_reload(id: i64) -> i64 {
+        if let Ok(mut st) = store().lock() {
+            let mut freed = 0usize;
+            let mut path: Option<String> = None;
+            if let Some(e) = st.map.get_mut(&id) {
+                if let Src::Path(p) = &e.src {
+                    path = Some(p.clone());
+                }
+                if path.is_some() {
+                    if let Some(t) = e.tex.take() {
+                        freed = t.bytes;
+                    }
+                }
+            }
+            st.bytes = st.bytes.saturating_sub(freed);
+            if let Some(p) = path {
+                let dims = image::image_dimensions(&p).ok();
+                if let Some(e) = st.map.get_mut(&id) {
+                    match dims {
+                        Some((w, h)) => {
+                            e.w = w;
+                            e.h = h;
+                            e.state = 0;
+                        }
+                        None => {
+                            e.state = 3;
+                            e.failed_ms = now_ms();
+                        }
+                    }
+                }
+                return 1;
+            }
+        }
+        0
+    }
+
+    /// Limit pamieci na zdekodowane tekstury w MB (domyslnie 256); nadmiar wypierany jest metoda LRU.
+    pub fn gui_image_budget(mb: i64) -> i64 {
+        if let Ok(mut st) = store().lock() {
+            st.budget = (mb.max(1) as usize) * 1024 * 1024;
+            evict(&mut st);
+        }
+        0
+    }
+
+    /// Maksymalny bok zdekodowanej tekstury w px (wieksze obrazy sa zmniejszane przy dekodowaniu), domyslnie 4096.
+    pub fn gui_image_max_size(px: i64) -> i64 {
+        if let Ok(mut st) = store().lock() {
+            st.max_dim = px.clamp(64, 16384) as u32;
+        }
+        0
+    }
+
+    /// Tryb synchroniczny (przy rysowaniu nieladowane obrazy dekoduje sie od razu) - dla testow i zrzutow ekranu.
+    pub fn gui_image_sync(on: i64) -> i64 {
+        if let Ok(mut st) = store().lock() {
+            st.sync = on != 0;
+        }
+        0
+    }
+
+    /// `[liczba obrazow, liczba gotowych, bajty tekstur, liczba dekodowan]`
+    pub fn gui_image_stats() -> Vec<f64> {
+        match store().lock() {
+            Ok(st) => vec![st.map.len() as f64, st.map.values().filter(|e| e.state == 2).count() as f64, st.bytes as f64, st.loads as f64],
+            Err(_) => vec![0.0; 4],
+        }
+    }
+
+    /// Zapisuje teksture do pliku (format wg rozszerzenia: png, jpg, webp).
+    pub fn gui_image_save(id: i64, path: String) -> i64 {
+        if gui_image_load(id) != 1 {
+            return -1;
+        }
+        let tex = match lookup(id) {
+            Some(t) => t,
+            None => return -1,
+        };
+        let pm = &tex.mips[0];
+        let mut raw = pm.data().to_vec();
+        for px in raw.chunks_exact_mut(4) {
+            let a = px[3] as u32;
+            let (b, g, r) = (px[0] as u32, px[1] as u32, px[2] as u32);
+            let un = |v: u32| -> u8 { if a == 0 { 0 } else { ((v * 255 + a / 2) / a).min(255) as u8 } };
+            px[0] = un(r);
+            px[1] = un(g);
+            px[2] = un(b);
+        }
+        let rgba = match image::RgbaImage::from_raw(pm.width(), pm.height(), raw) {
+            Some(i) => i,
+            None => return -1,
+        };
+        let lower = path.to_lowercase();
+        let res = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            image::DynamicImage::ImageRgba8(rgba).to_rgb8().save(&path)
+        } else {
+            rgba.save(&path)
+        };
+        if res.is_ok() { 0 } else { -1 }
+    }
+}
+
+/// Gamepady przez evdev (/dev/input/event*), w osobnym watku - bez libudev i bez zaleznosci C.
+/// Zdarzenia trafiaja do kolejki petli glownej jako `pad <kind> <pad_id> <nazwa> <wartosc>`.
+/// Nazwy przyciskow: A B X Y LB RB LT RT Back Start Guide L3 R3 Up Down Left Right.
+/// Osie: lx ly rx ry (-1..1, w dol dodatnie, ze strefa martwa), lt rt (0..1).
+pub mod pad {
+    use super::bg;
+    use std::collections::{HashMap, HashSet};
+    use std::fs::{File, OpenOptions};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static COUNT: AtomicI64 = AtomicI64::new(0);
+
+    const EV_KEY: u16 = 1;
+    const EV_ABS: u16 = 3;
+    const DEADZONE: f32 = 0.15;
+
+    fn ioc_read(nr: u8, size: usize) -> u64 {
+        (2u64 << 30) | ((size as u64) << 16) | ((b'E' as u64) << 8) | (nr as u64)
+    }
+
+    fn ioctl_buf(fd: i32, nr: u8, buf: &mut [u8]) -> bool {
+        let req = ioc_read(nr, buf.len());
+        unsafe { libc::ioctl(fd, req as _, buf.as_mut_ptr()) >= 0 }
+    }
+
+    fn test_bit(bits: &[u8], n: usize) -> bool {
+        bits.get(n / 8).map(|b| b & (1 << (n % 8)) != 0).unwrap_or(false)
+    }
+
+    struct AbsInfo {
+        min: i32,
+        max: i32,
+    }
+
+    struct Dev {
+        f: File,
+        id: u32,
+        path: String,
+        sony: bool,
+        has_rxy: bool,
+        has_btn_tl2: bool,
+        abs: HashMap<u16, AbsInfo>,
+        last: HashMap<&'static str, f32>,
+        trig_down: HashMap<&'static str, bool>,
+        hat: (i32, i32),
+    }
+
+    fn emit(kind: &str, id: u32, name: &str, value: f32) {
+        bg::push_line(format!("pad\t0\t{}\t{}\t{}\t{}", kind, id, name, value));
+    }
+
+    fn button_name(code: u16) -> Option<&'static str> {
+        Some(match code {
+            0x130 => "A",
+            0x131 => "B",
+            0x133 => "X",
+            0x134 => "Y",
+            0x136 => "LB",
+            0x137 => "RB",
+            0x138 => "LT",
+            0x139 => "RT",
+            0x13a => "Back",
+            0x13b => "Start",
+            0x13c => "Guide",
+            0x13d => "L3",
+            0x13e => "R3",
+            0x220 => "Up",
+            0x221 => "Down",
+            0x222 => "Left",
+            0x223 => "Right",
+            _ => return None,
+        })
+    }
+
+    // (nazwa, czy_spust)
+    fn axis_role(d: &Dev, code: u16) -> Option<(&'static str, bool)> {
+        match code {
+            0 => Some(("lx", false)),
+            1 => Some(("ly", false)),
+            2 => {
+                if d.sony {
+                    Some(("rx", false))
+                } else if d.has_rxy {
+                    Some(("lt", true))
+                } else {
+                    Some(("rx", false))
+                }
+            }
+            5 => {
+                if d.sony {
+                    Some(("ry", false))
+                } else if d.has_rxy {
+                    Some(("rt", true))
+                } else {
+                    Some(("ry", false))
+                }
+            }
+            3 => {
+                if d.sony {
+                    Some(("lt", true))
+                } else {
+                    Some(("rx", false))
+                }
+            }
+            4 => {
+                if d.sony {
+                    Some(("rt", true))
+                } else {
+                    Some(("ry", false))
+                }
+            }
+            0x0a => Some(("lt", true)),
+            0x09 => Some(("rt", true)),
+            _ => None,
+        }
+    }
+
+    fn handle_abs(d: &mut Dev, code: u16, value: i32) {
+        // krzyzak jako os
+        if code == 0x10 || code == 0x11 {
+            let v = value.clamp(-1, 1);
+            let (old, neg, pos) = if code == 0x10 { (d.hat.0, "Left", "Right") } else { (d.hat.1, "Up", "Down") };
+            if old != v {
+                if old < 0 {
+                    emit("button", d.id, neg, 0.0);
+                }
+                if old > 0 {
+                    emit("button", d.id, pos, 0.0);
+                }
+                if v < 0 {
+                    emit("button", d.id, neg, 1.0);
+                }
+                if v > 0 {
+                    emit("button", d.id, pos, 1.0);
+                }
+                if code == 0x10 {
+                    d.hat.0 = v;
+                } else {
+                    d.hat.1 = v;
+                }
+            }
+            return;
+        }
+        let (name, trigger) = match axis_role(d, code) {
+            Some(r) => r,
+            None => return,
+        };
+        let (min, max) = match d.abs.get(&code) {
+            Some(a) => (a.min, a.max),
+            None => return,
+        };
+        if max <= min {
+            return;
+        }
+        let v: f32;
+        if trigger {
+            let t = ((value - min) as f32 / (max - min) as f32).clamp(0.0, 1.0);
+            v = if t < 0.03 { 0.0 } else { t };
+        } else {
+            let half = (max - min) as f32 / 2.0;
+            let c = min as f32 + half;
+            let raw = ((value as f32 - c) / half).clamp(-1.0, 1.0);
+            v = if raw.abs() < DEADZONE { 0.0 } else { raw.signum() * ((raw.abs() - DEADZONE) / (1.0 - DEADZONE)) };
+        }
+        let last = d.last.get(name).copied().unwrap_or(0.0);
+        let edge = (v == 0.0 && last != 0.0) || (v.abs() >= 0.999 && (v - last).abs() > 0.0001);
+        if (v - last).abs() >= 0.02 || edge {
+            d.last.insert(name, v);
+            emit("axis", d.id, name, v);
+        }
+        if trigger && !d.has_btn_tl2 {
+            let bname = if name == "lt" { "LT" } else { "RT" };
+            let was = d.trig_down.get(bname).copied().unwrap_or(false);
+            let now = if was { v > 0.35 } else { v > 0.5 };
+            if now != was {
+                d.trig_down.insert(bname, now);
+                emit("button", d.id, bname, if now { 1.0 } else { 0.0 });
+            }
+        }
+    }
+
+    fn handle_event(d: &mut Dev, ev: &libc::input_event) {
+        if ev.type_ == EV_KEY {
+            if ev.value == 2 {
+                return;
+            }
+            if let Some(n) = button_name(ev.code) {
+                emit("button", d.id, n, if ev.value != 0 { 1.0 } else { 0.0 });
+            }
+        } else if ev.type_ == EV_ABS {
+            handle_abs(d, ev.code, ev.value);
+        }
+    }
+
+    fn probe(path: &str, id: u32) -> Option<(Dev, String)> {
+        let f = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(path).ok()?;
+        let fd = f.as_raw_fd();
+        let mut keys = [0u8; 96];
+        let mut abs = [0u8; 8];
+        if !ioctl_buf(fd, 0x20 + EV_KEY as u8, &mut keys) || !ioctl_buf(fd, 0x20 + EV_ABS as u8, &mut abs) {
+            return None;
+        }
+        let is_pad = test_bit(&keys, 0x130) && test_bit(&abs, 0) && test_bit(&abs, 1);
+        let is_pad2 = test_bit(&keys, 0x130) && (test_bit(&abs, 0x10) && test_bit(&abs, 0x11));
+        if !is_pad && !is_pad2 {
+            return None;
+        }
+        let mut name_buf = [0u8; 128];
+        let name = if ioctl_buf(fd, 0x06, &mut name_buf) {
+            let end = name_buf.iter().position(|b| *b == 0).unwrap_or(name_buf.len());
+            String::from_utf8_lossy(&name_buf[..end]).to_string()
+        } else {
+            "gamepad".to_string()
+        };
+        let mut idb = [0u8; 8];
+        let vendor = if ioctl_buf(fd, 0x02, &mut idb) { u16::from_le_bytes([idb[2], idb[3]]) } else { 0 };
+        let mut amap: HashMap<u16, AbsInfo> = HashMap::new();
+        for code in 0u16..0x40 {
+            if test_bit(&abs, code as usize) {
+                let mut ai = [0u8; 24];
+                if ioctl_buf(fd, 0x40 + code as u8, &mut ai) {
+                    let min = i32::from_le_bytes([ai[4], ai[5], ai[6], ai[7]]);
+                    let max = i32::from_le_bytes([ai[8], ai[9], ai[10], ai[11]]);
+                    amap.insert(code, AbsInfo { min, max });
+                }
+            }
+        }
+        let dev = Dev {
+            f,
+            id,
+            path: path.to_string(),
+            sony: vendor == 0x054c,
+            has_rxy: test_bit(&abs, 3) && test_bit(&abs, 4),
+            has_btn_tl2: test_bit(&keys, 0x138) && test_bit(&keys, 0x139),
+            abs: amap,
+            last: HashMap::new(),
+            trig_down: HashMap::new(),
+            hat: (0, 0),
+        };
+        Some((dev, name))
+    }
+
+    fn read_events(d: &mut Dev) -> bool {
+        let mut buf: [libc::input_event; 64] = unsafe { std::mem::zeroed() };
+        loop {
+            let n = unsafe { libc::read(d.f.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, std::mem::size_of_val(&buf)) };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                return match e.kind() {
+                    std::io::ErrorKind::WouldBlock => true,
+                    std::io::ErrorKind::Interrupted => continue,
+                    _ => false,
+                };
+            }
+            if n == 0 {
+                return false;
+            }
+            let cnt = n as usize / std::mem::size_of::<libc::input_event>();
+            for k in 0..cnt {
+                let ev = buf[k];
+                handle_event(d, &ev);
+            }
+        }
+    }
+
+    fn thread_main() {
+        let mut devs: Vec<Dev> = Vec::new();
+        let mut ignored: HashSet<String> = HashSet::new();
+        let mut next_id: u32 = 1;
+        let mut last_scan = Instant::now() - Duration::from_secs(10);
+        loop {
+            if !ENABLED.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+            if last_scan.elapsed() >= Duration::from_secs(2) {
+                last_scan = Instant::now();
+                let mut present: HashSet<String> = HashSet::new();
+                if let Ok(rd) = std::fs::read_dir("/dev/input") {
+                    for ent in rd.flatten() {
+                        let name = ent.file_name().to_string_lossy().to_string();
+                        if !name.starts_with("event") {
+                            continue;
+                        }
+                        let path = format!("/dev/input/{}", name);
+                        present.insert(path.clone());
+                        if ignored.contains(&path) || devs.iter().any(|d| d.path == path) {
+                            continue;
+                        }
+                        match probe(&path, next_id) {
+                            Some((dev, nm)) => {
+                                emit("connected", dev.id, &nm, 1.0);
+                                next_id += 1;
+                                devs.push(dev);
+                                COUNT.store(devs.len() as i64, Ordering::SeqCst);
+                            }
+                            None => {
+                                ignored.insert(path);
+                            }
+                        }
+                    }
+                }
+                ignored.retain(|p| present.contains(p));
+            }
+            if devs.is_empty() {
+                std::thread::sleep(Duration::from_millis(400));
+                continue;
+            }
+            let ready: Vec<bool> = {
+                let mut pfds: Vec<rustix::event::PollFd> = devs.iter().map(|d| rustix::event::PollFd::new(&d.f, rustix::event::PollFlags::IN)).collect();
+                let _ = rustix::event::poll(&mut pfds, 400);
+                pfds.iter().map(|p| !p.revents().is_empty()).collect()
+            };
+            let mut dead: Vec<usize> = Vec::new();
+            for (i, r) in ready.iter().enumerate() {
+                if *r && !read_events(&mut devs[i]) {
+                    dead.push(i);
+                }
+            }
+            for i in dead.into_iter().rev() {
+                let d = devs.remove(i);
+                emit("disconnected", d.id, "", 0.0);
+            }
+            COUNT.store(devs.len() as i64, Ordering::SeqCst);
+        }
+    }
+
+    /// Wlacza / wylacza nasluchiwanie gamepadow (watek startuje przy pierwszym wlaczeniu; GUI_GAMEPAD=0 blokuje).
+    pub fn gui_pad_enable(on: i64) -> i64 {
+        if std::env::var("GUI_GAMEPAD").map(|v| v == "0").unwrap_or(false) {
+            return 0;
+        }
+        ENABLED.store(on != 0, Ordering::SeqCst);
+        if on != 0 && !STARTED.swap(true, Ordering::SeqCst) {
+            let _ = std::thread::Builder::new().name("gui-pad".to_string()).spawn(thread_main);
+        }
+        1
+    }
+
+    /// Liczba podlaczonych gamepadow.
+    pub fn gui_pad_count() -> i64 {
+        COUNT.load(Ordering::SeqCst)
+    }
+}
+
 pub use plat::*;
+pub use bg::{gui_inject_message, gui_msg_take, gui_wake, gui_task_run, gui_task_http, gui_task_scan, gui_task_read, gui_task_write, gui_task_after, gui_task_cancel, gui_task_pending};
+pub use img::{gui_image_open, gui_image_open_b64, gui_image_gradient, gui_image_load, gui_image_prefetch, gui_image_state, gui_image_width, gui_image_height, gui_image_free, gui_image_unload, gui_image_reload, gui_image_budget, gui_image_max_size, gui_image_sync, gui_image_stats, gui_image_save};
+pub use pad::{gui_pad_enable, gui_pad_count};
 ]
