@@ -1,13 +1,13 @@
-get <bit:gui::native>
-get <bit:gui::fonts>
-get <bit:gui::util>
-get <bit:gui::color>
-get <bit:gui::theme>
-get <bit:gui::element>
-get <bit:gui::css>
-get <bit:gui::resolve>
-get <bit:gui::layout>
-get <bit:gui::render>
+include <native>
+include <fonts>
+include <util>
+include <color>
+include <theme>
+include <element>
+include <css>
+include <resolve>
+include <layout>
+include <render>
 
 struct Hit [
     id: Str,
@@ -47,7 +47,8 @@ struct WinState [
     dirty: Bool,
     drag: Str,
     cursor: Str,
-    active: Bool
+    active: Bool,
+    scroll_to: Dict<Str, Float>
 ]
 
 struct App [
@@ -63,7 +64,20 @@ struct App [
     force: Bool,
     mods: Int,
     tick_ms: Int,
-    last_tick: Int
+    last_tick: Int,
+    nav_keys: Bool,
+    nav_pad: Bool,
+    nav_wrap: Bool,
+    nav_win: Int,
+    pad_lx: Float,
+    pad_ly: Float,
+    pad_dpad: Int,
+    pad_dir: Int,
+    pad_next: Int,
+    pads: Int,
+    tweens: Dict<Str, Float>,
+    tween_to: Dict<Str, Float>,
+    tween_on: Bool
 ]
 
 struct EditRes [
@@ -81,7 +95,8 @@ fun win_state_new(id: Int, kind: Str, title: Str, w: Float, h: Float, clear: Int
     let se: Dict<Str, Int> = dict()
     let ed: Dict<Str, Str> = dict()
     let dummy = box_new(el_new("space"), 0.0, 0.0, 0.0, 0.0)
-    end WinState(id, kind, title, w, h, 1.0, false, false, clear, "", "", -1, "", "", 0.0, 0.0, sc, an, ca, se, ed, "", -1, "", "", 0, dummy, false, true, "", "default", false)
+    let st: Dict<Str, Float> = dict()
+    end WinState(id, kind, title, w, h, 1.0, false, false, clear, "", "", -1, "", "", 0.0, 0.0, sc, an, ca, se, ed, "", -1, "", "", 0, dummy, false, true, "", "default", false, st)
 ]
 
 !! ---------------------------------------------------------------- szukanie / trafienia
@@ -107,6 +122,12 @@ fun is_interactive(e: Element) -> Bool [
     if e.disabled [
         end false
     ]
+    if e.kind == "modal" [
+        end e.on
+    ]
+    if e.focusable [
+        end true
+    ]
     if e.kind == "button" or e.kind == "text_input" or e.kind == "pick_list" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" or e.kind == "slider" or e.kind == "tabs" [
         end true
     ]
@@ -119,6 +140,9 @@ fun is_interactive(e: Element) -> Bool [
 fun is_focusable(e: Element) -> Bool [
     if e.disabled [
         end false
+    ]
+    if e.focusable [
+        end true
     ]
     end e.kind == "button" or e.kind == "text_input" or e.kind == "pick_list" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" or e.kind == "slider"
 ]
@@ -173,7 +197,7 @@ fun hit_scroll(b: Box, x: Float, y: Float) -> Str [
         ]
         i = i - 1
     ]
-    if b.el.kind == "scrollable" [
+    if b.el.kind == "scrollable" or b.el.kind == "vgrid" [
         end b.el.id.clone()
     ]
     end ""
@@ -198,6 +222,9 @@ fun hit_tip(b: Box, x: Float, y: Float) -> Str [
 ]
 
 fun collect_focusable(b: Box, out: List<Str>) [
+    if b.el.kind == "modal" and not b.el.on [
+        end
+    ]
     if is_focusable(b.el.clone()) [
         out.push(b.el.id.clone())
     ]
@@ -211,7 +238,21 @@ fun collect_focusable(b: Box, out: List<Str>) [
 !! cele animacji: h: p: f: t: dla elementow interaktywnych
 fun collect_targets(b: Box, hover: Str, sub: Int, pressed: Str, focus: Str, out: Dict<Str, Float>) [
     let e = b.el.clone()
-    if is_interactive(e.clone()) or e.kind == "scrollable" [
+    if e.kind == "modal" [
+        let mv = 0.0
+        if e.on [
+            mv = 1.0
+        ]
+        out.insert("t:" + e.id, mv)
+    ]
+    if e.kind == "image" [
+        let iv = 0.0
+        if gui_image_state(e.img) == 2 [
+            iv = 1.0
+        ]
+        out.insert("i:" + e.id, iv)
+    ]
+    if is_interactive(e.clone()) or e.kind == "scrollable" or e.kind == "vgrid" [
         let id = e.id.clone()
         let hv = 0.0
         if hover == id [
@@ -258,6 +299,206 @@ fun collect_targets(b: Box, hover: Str, sub: Int, pressed: Str, focus: Str, out:
         collect_targets(b.kids[i].clone(), hover, sub, pressed, focus, out)
         i = i + 1
     ]
+]
+
+!! ---------------------------------------------------------------- nawigacja przestrzenna / pulapki fokusu
+!! najwyzszy otwarty modal (ostatni w drzewie)
+fun find_modal(b: Box) -> Option<Box> [
+    if b.el.kind == "modal" [
+        if b.el.on [
+            end some(b.clone())
+        ]
+        end none()
+    ]
+    let i = b.kids.len() - 1
+    while i >= 0 [
+        match find_modal(b.kids[i].clone()) [
+            Some(f) -> [
+                end some(f)
+            ]
+            None -> [
+            ]
+        ]
+        i = i - 1
+    ]
+    end none()
+]
+
+!! pulapka fokusu: otwarty modal lub kontener z `.focus_trap(true)` (ostatni/najglebszy wygrywa)
+fun find_trap(b: Box) -> Option<Box> [
+    if b.el.kind == "modal" and not b.el.on [
+        end none()
+    ]
+    let i = b.kids.len() - 1
+    while i >= 0 [
+        match find_trap(b.kids[i].clone()) [
+            Some(f) -> [
+                end some(f)
+            ]
+            None -> [
+            ]
+        ]
+        i = i - 1
+    ]
+    if b.el.trap [
+        end some(b.clone())
+    ]
+    end none()
+]
+
+fun focus_scope(root: Box) -> Box [
+    match find_trap(root.clone()) [
+        Some(t) -> [
+            end t
+        ]
+        None -> [
+        ]
+    ]
+    end root.clone()
+]
+
+fun collect_focus_boxes(b: Box, out: List<Box>) [
+    if b.el.kind == "modal" and not b.el.on [
+        end
+    ]
+    if is_focusable(b.el.clone()) [
+        out.push(b.clone())
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        collect_focus_boxes(b.kids[i].clone(), out)
+        i = i + 1
+    ]
+]
+
+!! kierunek: 1 gora, 2 dol, 3 lewo, 4 prawo. Wynik < 0 = nie jest kandydatem. Mniejszy = lepszy.
+fun nav_score(cur: Box, c: Box, dir: Int) -> Float [
+    let ccx = cur.x + cur.w / 2.0
+    let ccy = cur.y + cur.h / 2.0
+    let cx = c.x + c.w / 2.0
+    let cy = c.y + c.h / 2.0
+    let gap = 0.0
+    let main = 0.0
+    let cross = 0.0
+    let overlap = false
+    if dir == 2 [
+        if cy <= ccy + 1.0 [
+            end -1.0
+        ]
+        gap = fmax(0.0, c.y - (cur.y + cur.h))
+        main = cy - ccy
+        cross = fabs(cx - ccx)
+        overlap = c.x < cur.x + cur.w and c.x + c.w > cur.x
+    ]
+    if dir == 1 [
+        if cy >= ccy - 1.0 [
+            end -1.0
+        ]
+        gap = fmax(0.0, cur.y - (c.y + c.h))
+        main = ccy - cy
+        cross = fabs(cx - ccx)
+        overlap = c.x < cur.x + cur.w and c.x + c.w > cur.x
+    ]
+    if dir == 4 [
+        if cx <= ccx + 1.0 [
+            end -1.0
+        ]
+        gap = fmax(0.0, c.x - (cur.x + cur.w))
+        main = cx - ccx
+        cross = fabs(cy - ccy)
+        overlap = c.y < cur.y + cur.h and c.y + c.h > cur.y
+    ]
+    if dir == 3 [
+        if cx >= ccx - 1.0 [
+            end -1.0
+        ]
+        gap = fmax(0.0, cur.x - (c.x + c.w))
+        main = ccx - cx
+        cross = fabs(cy - ccy)
+        overlap = c.y < cur.y + cur.h and c.y + c.h > cur.y
+    ]
+    let k = 3.0
+    if overlap [
+        k = 1.0
+    ]
+    end gap + main * 0.1 + cross * k
+]
+
+!! indeks najlepszego kandydata w kierunku `dir` lub -1
+fun spatial_pick(cands: List<Box>, cur: Box, dir: Int) -> Int [
+    let best = -1
+    let bs = 1000000000.0
+    let i = 0
+    while i < cands.len() [
+        if cands[i].el.id != cur.el.id [
+            let sc = nav_score(cur.clone(), cands[i].clone(), dir)
+            if sc >= 0.0 and sc < bs [
+                bs = sc
+                best = i
+            ]
+        ]
+        i = i + 1
+    ]
+    end best
+]
+
+!! lancuch przodkow (scrollable / vgrid) od korzenia do elementu `id`; zwraca true, gdy znaleziono
+fun scroll_chain(b: Box, id: Str, out: List<Box>) -> Bool [
+    if b.el.id == id [
+        end true
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        if scroll_chain(b.kids[i].clone(), id, out) [
+            if b.el.kind == "scrollable" or b.el.kind == "vgrid" [
+                out.push(b.clone())
+            ]
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!! zapisuje (przyciete przez layout) przesuniecia przewijanych kontenerow
+fun collect_scrolls(b: Box, out: Dict<Str, Float>) [
+    if b.el.kind == "scrollable" or b.el.kind == "vgrid" [
+        out.insert(b.el.id.clone(), b.sc)
+    ]
+    let i = 0
+    while i < b.kids.len() [
+        collect_scrolls(b.kids[i].clone(), out)
+        i = i + 1
+    ]
+]
+
+fun dir_of_key(name: Str) -> Int [
+    if name == "ArrowUp" [
+        end 1
+    ]
+    if name == "ArrowDown" [
+        end 2
+    ]
+    if name == "ArrowLeft" [
+        end 3
+    ]
+    if name == "ArrowRight" [
+        end 4
+    ]
+    end 0
+]
+
+fun dir_key(dir: Int) -> Str [
+    if dir == 1 [
+        end "ArrowUp"
+    ]
+    if dir == 2 [
+        end "ArrowDown"
+    ]
+    if dir == 3 [
+        end "ArrowLeft"
+    ]
+    end "ArrowRight"
 ]
 
 !! ---------------------------------------------------------------- edycja tekstu
@@ -421,7 +662,9 @@ fun caret_from_x(e: Element, text: Str, bx: Float, x: Float) -> Int [
 
 fun app_new_state(theme: Theme) -> App [
     let ws: List<WinState> = []
-    end App("", theme, sheet_empty(), ws, true, 0, gui_now_ms(), gui_now_ms(), true, true, 0, 0, gui_now_ms())
+    let tw: Dict<Str, Float> = dict()
+    let tt: Dict<Str, Float> = dict()
+    end App("", theme, sheet_empty(), ws, true, 0, gui_now_ms(), gui_now_ms(), true, true, 0, 0, gui_now_ms(), false, true, false, 0, 0.0, 0.0, 0, 0, 0, 0, tw, tt, false)
 ]
 
 !! Podstawowy konstruktor: czcionki + backend (auto: Wayland -> X11 -> headless) + glowne okno
@@ -437,7 +680,11 @@ fun app_new_opts(title: Str, w: Int, h: Int, kind: Str, opts: Str) -> App [
     ]
     let app = app_new_state(theme_dark())
     app.backend = gui_init(want)
+    if app.backend != "headless" [
+        gui_pad_enable(1)
+    ]
     app.main = app.open_window(kind, title, w, h, opts)
+    app.nav_win = app.main
     end app
 ]
 
@@ -450,6 +697,9 @@ fun app_new_headless_shell() -> App [
     ]
     let app = app_new_state(theme_dark())
     app.backend = gui_init(want)
+    if app.backend != "headless" [
+        gui_pad_enable(1)
+    ]
     end app
 ]
 
@@ -573,11 +823,79 @@ impl App [
 
     !! rysuje okno `wi` z drzewem `ui`
     pub fun draw_win(self, wi: Int, ui: Element, now: Int) [
+        let dt0 = (now - self.last_ms) as Float
+        if dt0 > 60.0 [
+            dt0 = 60.0
+        ]
+        if dt0 < 1.0 [
+            dt0 = 1.0
+        ]
+        let sc_active = false
+        let skeys = self.wins[wi].scroll_to.keys()
+        let q = 0
+        while q < skeys.len() [
+            let key = skeys[q].clone()
+            let tgt = UNSET
+            match self.wins[wi].scroll_to.fetch(key.clone()) [
+                Some(v) -> [
+                    tgt = v
+                ]
+                None -> [
+                ]
+            ]
+            if tgt != UNSET [
+                let cur = 0.0
+                match self.wins[wi].scroll.fetch(key.clone()) [
+                    Some(v) -> [
+                        cur = v
+                    ]
+                    None -> [
+                    ]
+                ]
+                let nc = cur + (tgt - cur) * fmin(1.0, dt0 / 100.0)
+                if fabs(tgt - nc) < 0.5 [
+                    nc = tgt
+                    self.wins[wi].scroll_to.insert(key.clone(), UNSET)
+                ] else [
+                    sc_active = true
+                ]
+                self.wins[wi].scroll.insert(key, nc)
+            ]
+            q = q + 1
+        ]
         let ctx = Ctx(self.theme.clone(), self.sheet.clone(), self.wins[wi].hover.clone(), self.wins[wi].pressed.clone(), self.wins[wi].focus.clone())
         let root = resolve_el(ui, ctx, "@")
         let box = layout_root(root, self.wins[wi].w, self.wins[wi].h, self.wins[wi].scroll.clone())
         self.wins[wi].last = box.clone()
         self.wins[wi].has_last = true
+        let fixed: Dict<Str, Float> = dict()
+        collect_scrolls(box.clone(), fixed)
+        let fks = fixed.keys()
+        let fq = 0
+        while fq < fks.len() [
+            let fid = fks[fq].clone()
+            let fv = 0.0
+            match fixed.fetch(fid.clone()) [
+                Some(v) -> [
+                    fv = v
+                ]
+                None -> [
+                ]
+            ]
+            let fcur = 0.0
+            match self.wins[wi].scroll.fetch(fid.clone()) [
+                Some(v) -> [
+                    fcur = v
+                ]
+                None -> [
+                ]
+            ]
+            if fabs(fcur - fv) > 0.01 [
+                self.wins[wi].scroll.insert(fid.clone(), fv)
+                self.wins[wi].scroll_to.insert(fid.clone(), UNSET)
+            ]
+            fq = fq + 1
+        ]
         let targets: Dict<Str, Float> = dict()
         collect_targets(box.clone(), self.wins[wi].hover.clone(), self.wins[wi].sub, self.wins[wi].pressed.clone(), self.wins[wi].focus.clone(), targets)
         let dt = (now - self.last_ms) as Float
@@ -622,7 +940,7 @@ impl App [
             self.wins[wi].anim.insert(key, cur)
             k = k + 1
         ]
-        self.wins[wi].active = active
+        self.wins[wi].active = active or sc_active
         let show_tip = ""
         if self.wins[wi].tip != "" [
             show_tip = self.wins[wi].tip.clone()
@@ -668,6 +986,20 @@ impl App [
                 ]
             ]
             i = i + 1
+        ]
+        if self.pad_dir != 0 [
+            let rem4 = self.pad_next - now
+            if rem4 < 1 [
+                rem4 = 1
+            ]
+            if t < 0 or rem4 < t [
+                t = rem4
+            ]
+        ]
+        if self.tween_on [
+            if t < 0 or t > 8 [
+                t = 8
+            ]
         ]
         if self.tick_ms > 0 [
             let rem3 = self.tick_ms - (now - self.last_tick)
@@ -723,6 +1055,13 @@ impl App [
                 self.wins[j2].dirty = true
             ]
             j2 = j2 + 1
+        ]
+        if self.pad_dir != 0 and now2 >= self.pad_next [
+            self.pad_next = now2 + 110
+            self.nav_move(self.pad_dir, out)
+        ]
+        if self.tween_on [
+            self.step_tweens((now2 - now) as Float)
         ]
         if self.tick_ms > 0 and now2 - self.last_tick >= self.tick_ms [
             self.last_tick = now2
@@ -887,6 +1226,30 @@ impl App [
             out.push(m)
             end
         ]
+        if kind == "image" [
+            let k2 = 0
+            while k2 < self.wins.len() [
+                self.wins[k2].dirty = true
+                k2 = k2 + 1
+            ]
+            end
+        ]
+        if kind == "msg" and p.len() >= 7 [
+            let m = self.mk_msg(p[6].clone(), 0)
+            let pl = gui_msg_take(parse_i(p[2].clone()))
+            m.text = pl[0].clone()
+            m.text2 = pl[1].clone()
+            m.text3 = pl[2].clone()
+            m.num = parse_f(p[3].clone())
+            m.idx = parse_i(p[4].clone())
+            m.flag = p[5] == "1"
+            out.push(m)
+            end
+        ]
+        if kind == "pad" and p.len() >= 6 [
+            self.handle_pad(p[2].clone(), parse_i(p[3].clone()), p[4].clone(), parse_f(p[5].clone()), out)
+            end
+        ]
         let wi = self.win_index(wid)
         if wi < 0 [
             end
@@ -966,6 +1329,7 @@ impl App [
         ]
         if kind == "scroll" and p.len() >= 6 [
             let dy = parse_f(p[3].clone())
+            let dx = parse_f(p[2].clone())
             let mx = parse_f(p[4].clone())
             let my = parse_f(p[5].clone())
             self.wins[wi].mx = mx
@@ -981,7 +1345,18 @@ impl App [
                         None -> [
                         ]
                     ]
-                    self.wins[wi].scroll.insert(sid, cur + dy * 2.0)
+                    let amount = dy * 2.0
+                    match find_box(self.wins[wi].last.clone(), sid.clone()) [
+                        Some(sb) -> [
+                            if sb.el.axis == 1 and fabs(dx) > 0.01 [
+                                amount = dx * 2.0
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    self.wins[wi].scroll.insert(sid.clone(), cur + amount)
+                    self.wins[wi].scroll_to.insert(sid, UNSET)
                     self.wins[wi].dirty = true
                 ]
             ]
@@ -1109,6 +1484,10 @@ impl App [
                 if k == "button" [
                     self.wins[wi].focus = ""
                 ]
+                if b.el.focusable and k != "text_input" and k != "button" [
+                    self.wins[wi].focus = h.id.clone()
+                ]
+                self.nav_win = w.id
             ]
             None -> [
             ]
@@ -1129,6 +1508,17 @@ impl App [
             match find_box(w.last.clone(), pressed.clone()) [
                 Some(b) -> [
                     let k = b.el.kind.clone()
+                    if k == "modal" [
+                        let outside = true
+                        if b.kids.len() > 0 [
+                            outside = not inside(b.kids[0].clone(), w.mx, w.my)
+                        ]
+                        if outside [
+                            for am in self.activate(wi, b.clone()) [
+                                out.push(am)
+                            ]
+                        ]
+                    ]
                     if k == "button" or k == "checkbox" or k == "toggler" or k == "radio" or k == "container" or k == "row" or k == "column" or k == "stack" or k == "text" or k == "icon" [
                         for am in self.activate(wi, b.clone()) [
                             out.push(am)
@@ -1166,7 +1556,20 @@ impl App [
         ]
         let ctrl = (mods / 2) % 2 == 1
         let shift = mods % 2 == 1
+        self.nav_win = w.id
         if name == "Escape" [
+            if w.open_pick == "" [
+                match find_modal(w.last.clone()) [
+                    Some(mb) -> [
+                        if mb.el.msg != "" [
+                            out.push(self.mk_msg(mb.el.msg.clone(), w.id))
+                        ]
+                        end
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
             if w.open_pick != "" [
                 self.wins[wi].open_pick = ""
             ] else [
@@ -1177,7 +1580,7 @@ impl App [
         ]
         if name == "Tab" [
             let ids: List<Str> = []
-            collect_focusable(w.last.clone(), ids)
+            collect_focusable(focus_scope(w.last.clone()), ids)
             if ids.len() > 0 [
                 let cur = -1
                 let i = 0
@@ -1205,6 +1608,32 @@ impl App [
             ]
             end
         ]
+        if self.nav_keys and dir_of_key(name.clone()) > 0 [
+            let consume = true
+            if w.focus != "" [
+                match find_box(w.last.clone(), w.focus.clone()) [
+                    Some(fb) -> [
+                        let fk = fb.el.kind.clone()
+                        let nd = dir_of_key(name.clone())
+                        if fk == "text_input" [
+                            consume = false
+                        ]
+                        if fk == "slider" and nd > 2 [
+                            consume = false
+                        ]
+                        if fk == "pick_list" and w.open_pick == fb.el.id [
+                            consume = false
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            if consume [
+                self.nav_move(dir_of_key(name.clone()), out)
+                end
+            ]
+        ]
         if w.focus == "" [
             let m = self.mk_msg("key", w.id)
             m.text = name
@@ -1219,7 +1648,7 @@ impl App [
                 if e.kind == "text_input" [
                     self.edit_key(wi, b.clone(), name.clone(), text.clone(), mods, out)
                 ]
-                if e.kind == "button" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" [
+                if e.kind == "button" or e.kind == "checkbox" or e.kind == "toggler" or e.kind == "radio" or (e.focusable and e.kind != "text_input" and e.kind != "slider" and e.kind != "pick_list") [
                     if name == "Enter" or name == "Space" [
                         for am in self.activate(wi, b.clone()) [
                             out.push(am)
@@ -1358,5 +1787,518 @@ impl App [
             out.push(m)
         ]
         self.wins[wi].dirty = true
+    ]
+
+    !! ================================================================ nawigacja / gamepad / przewijanie / animacje
+    pub fun set_key_nav(self, on: Bool) [
+        self.nav_keys = on
+    ]
+
+    pub fun set_pad_nav(self, on: Bool) [
+        self.nav_pad = on
+    ]
+
+    pub fun set_nav_wrap(self, on: Bool) [
+        self.nav_wrap = on
+    ]
+
+    pub fun enable_gamepad(self, on: Bool) [
+        if on [
+            gui_pad_enable(1)
+        ] else [
+            gui_pad_enable(0)
+        ]
+    ]
+
+    pub fun focused(self, win: Int) -> Str [
+        let i = self.win_index(win)
+        if i >= 0 [
+            end self.wins[i].focus.clone()
+        ]
+        end ""
+    ]
+
+    !! przenosi fokus na `b`, przewija tak, by byl widoczny, i wysyla komunikat "focus" (text = id)
+    pub fun set_focus(self, wi: Int, b: Box, out: List<Message>) [
+        let w = self.wins[wi].clone()
+        self.wins[wi].focus = b.el.id.clone()
+        self.wins[wi].open_pick = ""
+        self.wins[wi].dirty = true
+        self.reset_caret()
+        let chain: List<Box> = []
+        scroll_chain(w.last.clone(), b.el.id.clone(), chain)
+        let ci = 0
+        while ci < chain.len() [
+            let a = chain[ci].clone()
+            let m = 14.0
+            let delta = 0.0
+            if a.el.axis == 1 [
+                let lo = a.x + a.el.st.pl + m
+                let hi = a.x + a.w - a.el.st.pr - m
+                if b.x < lo [
+                    delta = b.x - lo
+                ]
+                if b.x + b.w > hi [
+                    delta = b.x + b.w - hi
+                ]
+            ] else [
+                let lo = a.y + a.el.st.pt + m
+                let hi = a.y + a.h - a.el.st.pb - m
+                if b.y < lo [
+                    delta = b.y - lo
+                ]
+                if b.y + b.h > hi [
+                    delta = b.y + b.h - hi
+                ]
+            ]
+            if delta != 0.0 [
+                let base = a.sc
+                match self.wins[wi].scroll_to.fetch(a.el.id.clone()) [
+                    Some(v) -> [
+                        if v != UNSET [
+                            base = v
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.wins[wi].scroll_to.insert(a.el.id.clone(), fmax(0.0, base + delta))
+            ]
+            ci = ci + 1
+        ]
+        let fm = self.mk_msg("focus", w.id)
+        fm.text = b.el.id.clone()
+        out.push(fm)
+    ]
+
+    !! ruch fokusu w kierunku (1 gora, 2 dol, 3 lewo, 4 prawo); respektuje pulapki fokusu
+    pub fun nav_move(self, dir: Int, out: List<Message>) [
+        if false [
+            out.push(self.mk_msg("", 0))
+        ]
+        let wi = self.win_index(self.nav_win)
+        if wi < 0 [
+            wi = self.win_index(self.main)
+        ]
+        if wi < 0 [
+            end
+        ]
+        if not self.wins[wi].has_last [
+            end
+        ]
+        let w = self.wins[wi].clone()
+        let cands: List<Box> = []
+        collect_focus_boxes(focus_scope(w.last.clone()), cands)
+        if cands.len() == 0 [
+            end
+        ]
+        let cur = -1
+        let i = 0
+        while i < cands.len() [
+            if cands[i].el.id == w.focus [
+                cur = i
+            ]
+            i = i + 1
+        ]
+        if cur < 0 [
+            self.set_focus(wi, cands[0].clone(), out)
+            end
+        ]
+        let ck = cands[cur].el.kind.clone()
+        if ck == "slider" and dir > 2 [
+            self.key_event(wi, ["key", (w.id as Str), "1", "0", dir_key(dir), "", "0"], out)
+            end
+        ]
+        if ck == "pick_list" and w.open_pick == cands[cur].el.id [
+            self.key_event(wi, ["key", (w.id as Str), "1", "0", dir_key(dir), "", "0"], out)
+            end
+        ]
+        if ck == "text_input" and dir > 2 [
+            self.key_event(wi, ["key", (w.id as Str), "1", "0", dir_key(dir), "", "0"], out)
+            end
+        ]
+        let best = spatial_pick(cands.clone(), cands[cur].clone(), dir)
+        if best < 0 and self.nav_wrap [
+            let k = 0
+            let far = -1
+            let fs = -1.0
+            while k < cands.len() [
+                let opp = 1
+                if dir == 1 [
+                    opp = 2
+                ]
+                if dir == 3 [
+                    opp = 4
+                ]
+                if dir == 4 [
+                    opp = 3
+                ]
+                let sc = nav_score(cands[cur].clone(), cands[k].clone(), opp)
+                if sc >= 0.0 and sc > fs [
+                    fs = sc
+                    far = k
+                ]
+                k = k + 1
+            ]
+            best = far
+        ]
+        if best >= 0 [
+            self.set_focus(wi, cands[best].clone(), out)
+        ]
+    ]
+
+    pub fun nav_activate(self, out: List<Message>) [
+        if false [
+            out.push(self.mk_msg("", 0))
+        ]
+        let wi = self.win_index(self.nav_win)
+        if wi < 0 [
+            wi = self.win_index(self.main)
+        ]
+        if wi < 0 [
+            end
+        ]
+        if self.wins[wi].focus == "" [
+            self.nav_move(2, out)
+            end
+        ]
+        self.key_event(wi, ["key", (self.wins[wi].id as Str), "1", "0", "Enter", "", "0"], out)
+    ]
+
+    pub fun nav_back(self, out: List<Message>) [
+        let wi = self.win_index(self.nav_win)
+        if wi < 0 [
+            wi = self.win_index(self.main)
+        ]
+        if wi < 0 [
+            end
+        ]
+        let w = self.wins[wi].clone()
+        if w.open_pick != "" [
+            self.wins[wi].open_pick = ""
+            self.wins[wi].dirty = true
+            end
+        ]
+        if w.has_last [
+            match find_modal(w.last.clone()) [
+                Some(mb) -> [
+                    if mb.el.msg != "" [
+                        out.push(self.mk_msg(mb.el.msg.clone(), w.id))
+                    ]
+                    end
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        out.push(self.mk_msg("back", w.id))
+    ]
+
+    pub fun pad_direction(self) -> Int [
+        if self.pad_dpad % 2 == 1 [
+            end 1
+        ]
+        if (self.pad_dpad / 2) % 2 == 1 [
+            end 2
+        ]
+        if (self.pad_dpad / 4) % 2 == 1 [
+            end 3
+        ]
+        if (self.pad_dpad / 8) % 2 == 1 [
+            end 4
+        ]
+        if fabs(self.pad_lx) > 0.55 or fabs(self.pad_ly) > 0.55 [
+            if fabs(self.pad_ly) >= fabs(self.pad_lx) [
+                if self.pad_ly < 0.0 [
+                    end 1
+                ]
+                end 2
+            ]
+            if self.pad_lx < 0.0 [
+                end 3
+            ]
+            end 4
+        ]
+        end 0
+    ]
+
+    pub fun pad_dir_changed(self, out: List<Message>) [
+        if false [
+            out.push(self.mk_msg("", 0))
+        ]
+        let nd = self.pad_direction()
+        if nd != self.pad_dir [
+            self.pad_dir = nd
+            if nd != 0 and self.nav_pad [
+                self.nav_move(nd, out)
+                self.pad_next = gui_now_ms() + 380
+            ]
+            if nd == 0 [
+                self.pad_next = 0
+            ]
+        ]
+    ]
+
+    !! zdarzenia gamepada z warstwy natywnej -> Message (pad_button / pad_axis / pad_connected / pad_disconnected)
+    !! + opcjonalna nawigacja (D-pad i lewa galka = ruch fokusu, A = Enter, B = wstecz / zamkniecie modala)
+    pub fun handle_pad(self, kind: Str, pid: Int, name: Str, val: Float, out: List<Message>) [
+        if kind == "connected" [
+            self.pads = self.pads + 1
+            let m = self.mk_msg("pad_connected", 0)
+            m.text = name
+            m.idx = pid
+            out.push(m)
+            end
+        ]
+        if kind == "disconnected" [
+            self.pads = imax(0, self.pads - 1)
+            self.pad_dpad = 0
+            self.pad_lx = 0.0
+            self.pad_ly = 0.0
+            self.pad_dir = 0
+            let m2 = self.mk_msg("pad_disconnected", 0)
+            m2.idx = pid
+            out.push(m2)
+            end
+        ]
+        if kind == "button" [
+            let down = val > 0.5
+            let m3 = self.mk_msg("pad_button", 0)
+            m3.text = name
+            m3.idx = pid
+            m3.flag = down
+            m3.num = val
+            out.push(m3)
+            let bit = 0
+            if name == "Up" [
+                bit = 1
+            ]
+            if name == "Down" [
+                bit = 2
+            ]
+            if name == "Left" [
+                bit = 4
+            ]
+            if name == "Right" [
+                bit = 8
+            ]
+            if bit > 0 [
+                let has = (self.pad_dpad / bit) % 2 == 1
+                if down and not has [
+                    self.pad_dpad = self.pad_dpad + bit
+                ]
+                if (not down) and has [
+                    self.pad_dpad = self.pad_dpad - bit
+                ]
+                self.pad_dir_changed(out)
+            ]
+            if down and self.nav_pad [
+                if name == "A" [
+                    self.nav_activate(out)
+                ]
+                if name == "B" [
+                    self.nav_back(out)
+                ]
+            ]
+            end
+        ]
+        if kind == "axis" [
+            let m4 = self.mk_msg("pad_axis", 0)
+            m4.text = name
+            m4.idx = pid
+            m4.num = val
+            out.push(m4)
+            if name == "lx" [
+                self.pad_lx = val
+                self.pad_dir_changed(out)
+            ]
+            if name == "ly" [
+                self.pad_ly = val
+                self.pad_dir_changed(out)
+            ]
+        ]
+    ]
+
+    !! natychmiastowe ustawienie przewiniecia
+    pub fun scroll_set(self, win: Int, id: Str, offset: Float) [
+        let i = self.win_index(win)
+        if i >= 0 [
+            self.wins[i].scroll.insert(id.clone(), offset)
+            self.wins[i].scroll_to.insert(id, UNSET)
+            self.wins[i].dirty = true
+        ]
+    ]
+
+    !! animowane przewiniecie do `offset`
+    pub fun scroll_to(self, win: Int, id: Str, offset: Float) [
+        let i = self.win_index(win)
+        if i >= 0 [
+            self.wins[i].scroll_to.insert(id, fmax(0.0, offset))
+            self.wins[i].dirty = true
+        ]
+    ]
+
+    pub fun scroll_offset(self, win: Int, id: Str) -> Float [
+        let i = self.win_index(win)
+        if i >= 0 [
+            match self.wins[i].scroll.fetch(id) [
+                Some(v) -> [
+                    end v
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        end 0.0
+    ]
+
+    !! przewija (animowanie) tak, by element `index` wirtualnej siatki/listy `id` byl na srodku widoku
+    pub fun scroll_to_item(self, win: Int, id: Str, index: Int) [
+        let i = self.win_index(win)
+        if i < 0 or not self.wins[i].has_last [
+            end
+        ]
+        match find_box(self.wins[i].last.clone(), id.clone()) [
+            Some(b) -> [
+                let e = b.el.clone()
+                let lines = imax(1, b.cols)
+                let item_main = e.item_h
+                let view = b.h
+                if e.axis == 1 [
+                    item_main = e.item_w
+                    view = b.w
+                ]
+                let step = item_main + e.st.gap
+                let line = index / lines
+                let target = (line as Float) * step - (view - item_main) / 2.0
+                self.scroll_to(win, id, fmax(0.0, target))
+            ]
+            None -> [
+            ]
+        ]
+    ]
+
+    !! zakres widocznych elementow wirtualnej siatki (pionowej): [first, koniec(wylacznie), kolumny]; z buforem 1 wiersza
+    pub fun vrange(self, win: Int, id: Str, count: Int, item_w: Float, item_h: Float, gap: Float, cols: Int) -> List<Int> [
+        let i = self.win_index(win)
+        let vw = 0.0
+        let vh = 0.0
+        let off = 0.0
+        if i >= 0 [
+            vw = self.wins[i].w
+            vh = self.wins[i].h
+            if self.wins[i].has_last [
+                match find_box(self.wins[i].last.clone(), id.clone()) [
+                    Some(b) -> [
+                        vw = b.w
+                        vh = b.h
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            match self.wins[i].scroll.fetch(id.clone()) [
+                Some(v) -> [
+                    off = v
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        let lines = cols
+        if lines <= 0 [
+            lines = imax(1, ((vw + gap) / (item_w + gap)) as Int)
+        ]
+        let step = fmax(1.0, item_h + gap)
+        let fl = imax(0, ((off / step) as Int) - 2)
+        let ll = ((off + vh) / step) as Int + 2
+        let first = imin(count, fl * lines)
+        let last = imin(count, (ll + 1) * lines)
+        end [first, last, lines]
+    ]
+
+    !! animowana wartosc: przesuwa sie ku `target` (staly czas ~120 ms); wywolaj w widoku, uzyj wyniku np. w .offset()/.scale()
+    pub fun tween(self, key: Str, target: Float) -> Float [
+        let cur = target
+        match self.tweens.fetch(key.clone()) [
+            Some(v) -> [
+                cur = v
+            ]
+            None -> [
+            ]
+        ]
+        if fabs(cur - target) > 0.001 [
+            self.tween_on = true
+        ]
+        self.tween_to.insert(key.clone(), target)
+        self.tweens.insert(key, cur)
+        end cur
+    ]
+
+    pub fun step_tweens(self, dt: Float) [
+        let any = false
+        let keys = self.tween_to.keys()
+        let i = 0
+        while i < keys.len() [
+            let k = keys[i].clone()
+            let tgt = 0.0
+            match self.tween_to.fetch(k.clone()) [
+                Some(v) -> [
+                    tgt = v
+                ]
+                None -> [
+                ]
+            ]
+            let cur = tgt
+            match self.tweens.fetch(k.clone()) [
+                Some(v) -> [
+                    cur = v
+                ]
+                None -> [
+                ]
+            ]
+            if fabs(tgt - cur) > 0.001 [
+                cur = cur + (tgt - cur) * fmin(1.0, fmax(dt, 1.0) / 120.0)
+                if fabs(tgt - cur) <= 0.001 [
+                    cur = tgt
+                ] else [
+                    any = true
+                ]
+                self.tweens.insert(k, cur)
+            ]
+            i = i + 1
+        ]
+        self.tween_on = any
+        let j = 0
+        while j < self.wins.len() [
+            self.wins[j].dirty = true
+            j = j + 1
+        ]
+    ]
+
+    !! ---- zadania w tle (wynik wraca jako Message o podanym `id`; patrz gui_task_*)
+    pub fun post(self, id: Str, text: Str) [
+        gui_inject_message(id, text, "", "", 0.0, 0, 0)
+    ]
+
+    pub fun task_run(self, id: Str, cmd: Str, args: List<Str>) [
+        gui_task_run(id, cmd, args)
+    ]
+
+    pub fun task_http_get(self, id: Str, url: Str) [
+        let h: List<Str> = []
+        gui_task_http(id, "GET", url, h, "", 20)
+    ]
+
+    pub fun task_scan(self, id: Str, roots: List<Str>, suffixes: List<Str>, depth: Int) [
+        gui_task_scan(id, roots, suffixes, depth)
+    ]
+
+    pub fun task_after(self, id: Str, ms: Int) [
+        gui_task_after(id, ms)
+    ]
+
+    pub fun task_cancel(self, id: Str) [
+        gui_task_cancel(id)
     ]
 ]
