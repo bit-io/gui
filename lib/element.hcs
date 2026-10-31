@@ -1,5 +1,5 @@
-get <bit:gui::util>
-get <bit:gui::color>
+include <util>
+include <color>
 
 !! Dlugosc jak w iced: shrink (do tresci), fixed(px), fill / portion(n) (czesc wolnego miejsca).
 !! kind: -1 nieustawione, 0 shrink, 1 fixed, 2 fill/portion
