@@ -37,7 +37,7 @@ mrugnięcia kursora lub `tick`) → zdarzenia przeliczane na `Message`. Bez zdar
 ## Lista poleceń rysowania (`Ops` → `paint::run_ops`)
 Strumień `Float`: kod operacji i argumenty (kolory jako `0xRRGGBBAA` w `Float`):
 `1 RRECT` · `2 STROKE` · `3 LGRAD` · `4 RGRAD` · `5 SHADOW(blur,spread,dx,dy,inset)` · `6 TEXT` · `7 CLIP`/`8 UNCLIP` · `9 ICON` · `10 BACKDROP(rozmycie tła)` ·
-`11 LAYER(alfa)`/`12 ENDLAYER` · `13 LINE` · `14 PATH(SVG)` · `15 CLEAR`. Bufor jest BGRA (premultiplied), rysowany wprost w `mmap` bufora `wl_shm`
+`11 LAYER(alfa)`/`12 ENDLAYER` · `13 LINE` · `14 PATH(SVG)` · `15 CLEAR` · `16 IMAGE(id,x,y,w,h,r,fit,alfa,fx,fy)` · `17 XFORM(skala,cx,cy,tx,ty)`/`18 ENDXFORM`. Bufor jest BGRA (premultiplied), rysowany wprost w `mmap` bufora `wl_shm`
 (Wayland) lub w pamięci i wysyłany `PutImage` (X11) — bez kopiowania i konwersji kanałów (R↔B zamieniane przy tworzeniu koloru).
 Tekst: glify z konturów `ttf-parser` rastrowane `tiny-skia` z pozycjonowaniem podpikselowym (4 pozycje) i kerningiem z GPOS, cache masek glifów.
 
@@ -45,7 +45,8 @@ Tekst: glify z konturów `ttf-parser` rastrowane `tiny-skia` z pozycjonowaniem p
 `gui_init gui_backend_name gui_globals gui_poll gui_inject gui_fonts_init` · okna: `gui_win_create gui_win_draw gui_win_title gui_win_close gui_win_resize gui_cursor` ·
 tekst: `gui_text_measure gui_text_wrap gui_font_ascent gui_font_descent gui_str_len gui_lower` · schowek: `gui_clip_set gui_clip_get` ·
 powłoka: `gui_session_lock gui_idle_watch gui_inhibit_idle gui_toplevel_action gui_run gui_spawn gui_list_apps gui_read_file gui_write_file` ·
-testy: `gui_screenshot gui_set_scale gui_exit gui_file_size gui_now_ms gui_env`. Wywołuje się je z HackerScript po `get <bit:gui::native>` (lub `get <bit:gui>`);
+obrazy: `gui_image_*` · gamepad: `gui_pad_*` · zadania w tle i kolejka: `gui_inject_message gui_msg_take gui_task_*` ·
+testy: `gui_pixel gui_screenshot gui_set_scale gui_exit gui_file_size gui_now_ms gui_env`. Wywołuje się je z HackerScript po `get <bit:gui::native>` (lub `get <bit:gui>`);
 argumenty przekazywane są **przez wartość** (`String`, `Vec<f64>`, `Vec<String>`).
 
 ## Edycja `native.hcs`
@@ -60,3 +61,7 @@ a `pub use plat::*;` udostępnia `gui_*`. Zależności zadeklarowane są `get <c
 * 300+ elementów: `resolve` 1 ms, `layout` 10 ms, polecenia 5 ms, rasteryzacja 600×800 z cieniami 23 ms (nieoptymalizowane; cienie i rozmycie liczone na CPU)
 * kompilacja programu z `gui`: transpilacja ok. 2 min w moim środowisku (`hackerc` 0.5 zbudowany bez LTO, `opt-level=1`) + ok. 45–75 s `cargo` — pierwsze
   budowanie zależności trwa dłużej; główny koszt to parsowanie 160 KB bloku natywnego i 140 KB czcionek w base64 przez `hackerc`
+
+
+## Rozszerzenia 0.2
+Obrazy, gamepad, nawigacja 2D, wirtualizacja, zadania w tle i animacje: **docs/LAUNCHER.md**. Wątki (obrazy, gamepad, zadania) komunikują się z pętlą przez kolejkę z deskryptorem budzącym `poll` (`bg::push_line`), więc `gui_poll` nadal śpi bez zdarzeń.
