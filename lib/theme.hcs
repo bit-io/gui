@@ -1,4 +1,4 @@
-get <bit:gui::color>
+include <color>
 
 struct Palette [
     bg: Int,
