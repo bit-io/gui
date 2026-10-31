@@ -1,4 +1,4 @@
-get <bit:gui::native>
+include <native>
 
 const UNSET: Float = -9999.0
 const UNSET_I: Int = -1
@@ -48,6 +48,12 @@ fun fround(v: Float) -> Float [
 
 fun lerp(a: Float, b: Float, t: Float) -> Float [
     end a + (b - a) * t
+]
+
+!! wygladzanie (smoothstep) 0..1 dla animacji
+fun ease(t: Float) -> Float [
+    let x = fclamp(t, 0.0, 1.0)
+    end x * x * (3.0 - 2.0 * x)
 ]
 
 fun imax(a: Int, b: Int) -> Int [
