@@ -1,7 +1,7 @@
-get <bit:gui::util>
-get <bit:gui::color>
-get <bit:gui::element>
-get <bit:gui::native>
+include <util>
+include <color>
+include <element>
+include <native>
 
 struct Size [
     w: Float,
@@ -18,13 +18,14 @@ struct Box [
     lines: List<Str>,
     cw: Float,
     ch: Float,
-    sc: Float
+    sc: Float,
+    cols: Int
 ]
 
 fun box_new(e: Element, x: Float, y: Float, w: Float, h: Float) -> Box [
     let kids: List<Box> = []
     let lines: List<Str> = []
-    end Box(x, y, w, h, e, kids, lines, 0.0, 0.0, 0.0)
+    end Box(x, y, w, h, e, kids, lines, 0.0, 0.0, 0.0, 0)
 ]
 
 fun el_line_h(e: Element) -> Float [
@@ -97,6 +98,26 @@ fun size_of(e: Element, max_w: Float) -> Size [
         w = e.st.size
         h = e.st.size
     ]
+    if e.kind == "image" [
+        let nw = gui_image_width(e.img) as Float
+        let nh = gui_image_height(e.img) as Float
+        let ratio = e.aspect
+        if ratio <= 0.0 and nh > 0.0 [
+            ratio = nw / nh
+        ]
+        w = nw
+        if e.st.w.kind == 1 [
+            w = fmax(0.0, e.st.w.v - pad_w(e.clone()))
+        ] else [
+            if inner_max > 0.0 and (e.st.w.kind == 2 or w > inner_max or w == 0.0) [
+                w = inner_max
+            ]
+        ]
+        h = nh
+        if ratio > 0.0 [
+            h = w / ratio
+        ]
+    ]
     if e.kind == "button" [
         if e.kids.len() > 0 [
             let k = size_of(e.kids[0].clone(), inner_max)
@@ -163,7 +184,7 @@ fun size_of(e: Element, max_w: Float) -> Size [
         w = 0.0
         h = 0.0
     ]
-    if e.kind == "container" or e.kind == "tooltip" or e.kind == "scrollable" [
+    if e.kind == "container" or e.kind == "tooltip" or e.kind == "scrollable" or e.kind == "modal" [
         if e.kids.len() > 0 [
             let k = size_of(e.kids[0].clone(), inner_max)
             w = k.w + mar_w(e.kids[0].clone())
@@ -285,7 +306,7 @@ fun place(e: Element, x: Float, y: Float, w: Float, h: Float, sc: Dict<Str, Floa
     if e.kind == "text" [
         b.lines = text_lines(e.text.clone(), e.clone(), iw)
     ]
-    if e.kind == "container" or e.kind == "tooltip" or e.kind == "button" [
+    if e.kind == "container" or e.kind == "tooltip" or e.kind == "button" or e.kind == "modal" [
         if e.kids.len() > 0 [
             let k = e.kids[0].clone()
             let d = child_dims(k.clone(), iw, ih)
@@ -305,7 +326,108 @@ fun place(e: Element, x: Float, y: Float, w: Float, h: Float, sc: Dict<Str, Floa
             i = i + 1
         ]
     ]
-    if e.kind == "scrollable" [
+    if e.kind == "vgrid" [
+        let horiz = e.axis == 1
+        let gap = e.st.gap
+        let cross = iw
+        let main_view = ih
+        let item_cross = e.item_w
+        let item_main = e.item_h
+        let cross_al = e.st.ax
+        if horiz [
+            cross = ih
+            main_view = iw
+            item_cross = e.item_h
+            item_main = e.item_w
+            cross_al = e.st.ay
+        ]
+        let lines = e.cols
+        if lines <= 0 [
+            lines = 1
+            if item_cross > 0.0 [
+                lines = imax(1, ((cross + gap) / (item_cross + gap)) as Int)
+            ]
+        ]
+        let cell = item_cross
+        if cell <= 0.0 [
+            cell = fmax(1.0, (cross - gap * ((lines - 1) as Float)) / (lines as Float))
+        ]
+        let used_cross = cell * (lines as Float) + gap * ((lines - 1) as Float)
+        let cross_off = align_off(cross_al, cross - used_cross)
+        let nlines = (e.nitems + lines - 1) / lines
+        let content = 0.0
+        if nlines > 0 [
+            content = (nlines as Float) * (item_main + gap) - gap
+        ]
+        let off = 0.0
+        match sc.fetch(e.id.clone()) [
+            Some(v) -> [
+                off = v
+            ]
+            None -> [
+            ]
+        ]
+        off = fclamp(off, 0.0, fmax(0.0, content - main_view))
+        b.sc = off
+        b.cols = lines
+        if horiz [
+            b.cw = content
+            b.ch = ih
+        ] else [
+            b.cw = iw
+            b.ch = content
+        ]
+        let step = fmax(1.0, item_main + gap)
+        let fl = imax(0, ((off / step) as Int) - 1)
+        let ll = ((off + main_view) / step) as Int + 1
+        let i = 0
+        while i < e.kids.len() [
+            let idx = e.first + i
+            let line = idx / lines
+            let col = idx % lines
+            if line >= fl and line <= ll and idx >= 0 and idx < e.nitems [
+                let pm = (line as Float) * step - off
+                let pc = cross_off + (col as Float) * (cell + gap)
+                if horiz [
+                    b.kids.push(place(e.kids[i].clone(), ix + pm, iy + pc, item_main, cell, sc.clone()))
+                ] else [
+                    b.kids.push(place(e.kids[i].clone(), ix + pc, iy + pm, cell, item_main, sc.clone()))
+                ]
+            ]
+            i = i + 1
+        ]
+    ]
+    if e.kind == "scrollable" and e.axis == 1 [
+        if e.kids.len() > 0 [
+            let k = e.kids[0].clone()
+            let nat = size_of(k.clone(), 0.0)
+            let cw = nat.w
+            if k.st.w.kind == 2 [
+                cw = fmax(cw, iw - mar_w(k.clone()))
+            ]
+            let nat2 = size_of(k.clone(), cw)
+            let chh = nat2.h
+            if k.st.h.kind == 2 [
+                chh = fmax(0.0, ih - mar_h(k.clone()))
+            ]
+            let maxs = fmax(0.0, cw + mar_w(k.clone()) - iw)
+            let off = 0.0
+            match sc.fetch(e.id.clone()) [
+                Some(v) -> [
+                    off = v
+                ]
+                None -> [
+                ]
+            ]
+            off = fclamp(off, 0.0, maxs)
+            b.sc = off
+            b.cw = cw + mar_w(k.clone())
+            b.ch = chh
+            let oy = iy + k.st.mt + align_off(e.st.ay, ih - chh - mar_h(k.clone()))
+            b.kids.push(place(k.clone(), ix + k.st.ml - off, oy, cw, chh, sc.clone()))
+        ]
+    ]
+    if e.kind == "scrollable" and e.axis != 1 [
         if e.kids.len() > 0 [
             let k = e.kids[0].clone()
             let nat = size_of(k.clone(), iw - mar_w(k.clone()))
