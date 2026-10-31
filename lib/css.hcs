@@ -1,6 +1,6 @@
-get <bit:gui::util>
-get <bit:gui::color>
-get <bit:gui::element>
+include <util>
+include <color>
+include <element>
 
 struct Rule [
     kind: Str,
@@ -341,6 +341,26 @@ fun css_decl(st: Style, prop: Str, val: Str) -> Style [
     ]
     if prop == "opacity" [
         s.opacity = css_num(val)
+    ]
+    if prop == "transform" [
+        let a = s_find(val, "scale(")
+        if a >= 0 [
+            let b = s_find(val.slice(a, val.len()), ")")
+            if b > 6 [
+                s.scl = css_num(val.slice(a + 6, a + b))
+            ]
+        ]
+        let t = s_find(val, "translate(")
+        if t >= 0 [
+            let b2 = s_find(val.slice(t, val.len()), ")")
+            if b2 > 10 [
+                let parts = s_split(val.slice(t + 10, t + b2), ",")
+                s.mvx = css_num(parts[0].clone())
+                if parts.len() > 1 [
+                    s.mvy = css_num(parts[1].clone())
+                ]
+            ]
+        ]
     ]
     if prop == "letter-spacing" [
         s.ls = css_num(val)
