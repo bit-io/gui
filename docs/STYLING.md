@@ -36,3 +36,7 @@ Brak: `@media`, zmienne `var()`, selektory potomków (`a b`), animacje `@keyfram
 ## Ikony
 67 ikon Lucide: `icon("wifi")`, `button("Zapisz").with_icon("check")`. Lista: `arrow-down arrow-left arrow-right arrow-up battery-charging battery bell-off bell bluetooth calendar camera check chevron-down chevron-left chevron-right chevron-up circle-check clock copy cpu download external-link eye-off eye file folder globe hard-drive heart house image info layout-grid lock-open lock log-out maximize menu mic minimize minus monitor moon music pause pencil play plus power refresh-cw search settings skip-back skip-forward sliders-horizontal star sun terminal trash triangle-alert upload user volume-2 volume-x wifi-off wifi x`.
 Własny rysunek: `canvas("M4 4 L20 20", 24.0)` (ścieżka SVG: `M L H V C S Q T A Z`).
+
+
+## Transformacje (0.2)
+`transform: scale(1.1)` i `translate(x, y)` oraz warianty `:hover` / `:focus` (np. `.tile:focus { transform: scale(1.08); }`) — patrz docs/LAUNCHER.md, sekcja 6.
