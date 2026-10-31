@@ -1,0 +1,125 @@
+get <bit:gui>
+
+struct State [
+    covers: List<Int>,
+    selected: Int,
+    modal: Bool,
+    menu: Bool,
+    info: Str,
+    status: Str
+]
+
+fun game_color(i: Int, k: Int) -> Int [
+    let r = (i * 53 + k * 90) % 180 + 50
+    let g = (i * 97 + k * 40) % 160 + 40
+    let b = (i * 31 + k * 120) % 190 + 40
+    end rgb(r, g, b)
+]
+
+fun make_covers(n: Int) -> List<Int> [
+    let out: List<Int> = []
+    let i = 0
+    while i < n [
+        out.push(gui_image_gradient(300, 450, game_color(i, 0), game_color(i, 1), 70.0))
+        i = i + 1
+    ]
+    end out
+]
+
+fun tile(i: Int, tex: Int, big: Bool) -> Element [
+    let w = 150.0
+    let h = 200.0
+    if big [
+        w = 260.0
+        h = 150.0
+    ]
+    let cover = image_tex(tex).fit_cover().size_px(w, h).radius(12.0)
+    let label = text("Gra " + (i as Str)).size(13.0).bold()
+    let t = container(column([ cover, label ]).spacing(6.0)).padding(6.0).radius(16.0)
+    let pre = "g"
+    if big [
+        pre = "f"
+    ]
+    end t.id(pre + (i as Str)).on_press("open:" + (i as Str)).focusable().focus_scale(1.07).hover_scale(1.03).shadow(18.0, 8.0, rgba(0, 0, 0, 90))
+]
+
+fun update(state: State, m: Message) -> State [
+    let s = state.clone()
+    if s_starts(m.id.clone(), "open:") [
+        s.selected = parse_i(s_sub(m.id.clone(), 5, slen(m.id.clone())))
+        s.modal = true
+        s.info = "Pobieram dane…"
+    ]
+    if m.id == "details" [
+        s.info = "Ocena ProtonDB: Gold · dziala po Protonie 9, 60 FPS na Steam Deck"
+    ]
+    if m.id == "close" or m.id == "back" [
+        if s.modal [
+            s.modal = false
+        ] else [
+            s.menu = false
+        ]
+    ]
+    if m.id == "pad_button" and m.flag and m.text == "Y" [
+        s.menu = not s.menu
+    ]
+    if m.id == "pad_connected" [
+        s.status = "Pad: " + m.text.clone()
+    ]
+    if m.id == "pad_disconnected" [
+        s.status = "Pad odlaczony"
+    ]
+    if m.id == "focus" [
+        s.status = "Fokus: " + m.text.clone()
+    ]
+    end s
+]
+
+fun view(app: App, state: State) -> Element [
+    let n = state.covers.len()
+    let feat: List<Element> = []
+    let f = 0
+    while f < 6 [
+        feat.push(tile(f, state.covers[f], true))
+        f = f + 1
+    ]
+    let vr = app.vrange(app.main, "grid", n, 150.0, 232.0, 14.0, 0)
+    let items: List<Element> = []
+    let i = vr[0]
+    while i < vr[1] [
+        items.push(tile(i, state.covers[i], false))
+        i = i + 1
+    ]
+    let grid = virtual_grid(n, 150.0, 232.0, items).first_index(vr[0]).spacing(14.0).padding(10.0).id("grid")
+    let head = row([ heading("Biblioteka"), space().fill_width(), text(state.status.clone()).class("caption"), button("Menu (Y)").class("ghost").on_press("menu") ]).align_y(1).padding_xy(16.0, 10.0)
+    let strip = scrollable_x(row(feat).spacing(14.0).padding(10.0)).id("featured")
+    let page = column([ head, strip, grid ]).spacing(6.0).fill_all()
+    let detail = column([ heading("Gra " + (state.selected as Str)), text(state.info.clone()).class("caption").max_width(340.0), row([ button("Graj").class("primary").id("play").on_press("close").focusable(), button("Zamknij").id("shut").on_press("close") ]).spacing(10.0) ]).spacing(12.0)
+    let card = container(detail).class("card").padding(24.0)
+    let side = column([ heading("Menu"), button("Biblioteka").id("m1").on_press("close"), button("Ustawienia").id("m2").on_press("close") ]).spacing(10.0).padding(20.0).background(rgb(30, 30, 46)).fill_height().width(fixed(220.0))
+    end stack([ page, drawer(side, state.menu, 1).on_dismiss("close"), modal(card, state.modal).on_dismiss("close") ]).fill_all()
+]
+
+fun main() [
+    let app = app_new("Launcher", 1000, 680)
+    app.set_key_nav(true)
+    let state = State(make_covers(320), 0, false, false, "", "Strzalki / pad: ruch, Enter / A: otworz, Esc / B: wstecz")
+    let frames = 0
+    let shot = gui_env("GUI_SHOT")
+    while app.running() [
+        for m in app.frame1(view(app, state.clone())) [
+            if s_starts(m.id.clone(), "open:") [
+                app.task_after("details", 600)
+            ]
+            if m.id == "menu" [
+                state.menu = not state.menu
+            ]
+            state = update(state.clone(), m)
+        ]
+        frames = frames + 1
+        if shot != "" and frames == 12 [
+            gui_screenshot(app.main, shot.clone())
+            app.quit()
+        ]
+    ]
+]
