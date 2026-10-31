@@ -65,11 +65,14 @@ struct Style [
     line_h: Float,
     tx: Int,
     wrap: Int,
-    clip: Int
+    clip: Int,
+    scl: Float,
+    mvx: Float,
+    mvy: Float
 ]
 
 fun style_unset() -> Style [
-    end Style(UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, len_unset(), len_unset(), UNSET, UNSET, UNSET, UNSET, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET, UNSET, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET_I, UNSET_I)
+    end Style(UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, UNSET, len_unset(), len_unset(), UNSET, UNSET, UNSET, UNSET, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET, UNSET, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET, UNSET_I, UNSET, UNSET, UNSET_I, UNSET_I, UNSET_I, UNSET, UNSET, UNSET)
 ]
 
 !! Zlacz style: pola ustawione w `over` wygrywaja z `base` (kaskada CSS: motyw -> arkusz -> inline).
@@ -183,6 +186,15 @@ fun style_merge(base: Style, over: Style) -> Style [
     if over.clip != UNSET_I [
         s.clip = over.clip
     ]
+    if over.scl != UNSET [
+        s.scl = over.scl
+    ]
+    if over.mvx != UNSET [
+        s.mvx = over.mvx
+    ]
+    if over.mvy != UNSET [
+        s.mvy = over.mvy
+    ]
     end s
 ]
 
@@ -209,7 +221,7 @@ fun msg_is(m: Message, id: Str) -> Bool [
 ]
 
 !! Wspolny wezel drzewa. `kind`: column row container text button icon text_input checkbox toggler radio slider
-!! progress scrollable space rule stack tooltip pick_list tabs canvas
+!! progress scrollable space rule stack tooltip pick_list tabs canvas image modal vgrid
 struct Element [
     kind: Str,
     id: Str,
@@ -234,13 +246,30 @@ struct Element [
     pr_bg: Int,
     pr_fg: Int,
     pr_bc: Int,
-    hv_sh: Float
+    hv_sh: Float,
+    fit: Int,
+    fx: Float,
+    fy: Float,
+    img: Int,
+    aspect: Float,
+    focusable: Bool,
+    trap: Bool,
+    axis: Int,
+    ring: Bool,
+    hv_scl: Float,
+    fo_scl: Float,
+    nitems: Int,
+    item_w: Float,
+    item_h: Float,
+    first: Int,
+    cols: Int,
+    slide: Int
 ]
 
 fun el_new(kind: Str) -> Element [
     let none_list: List<Element> = []
     let no_opts: List<Str> = []
-    end Element(kind, "", "", "", "", none_list, style_unset(), "", "", 0.0, 0.0, 1.0, 0.0, false, false, false, no_opts, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET)
+    end Element(kind, "", "", "", "", none_list, style_unset(), "", "", 0.0, 0.0, 1.0, 0.0, false, false, false, no_opts, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET_I, UNSET, 1, 0.5, 0.5, -1, 0.0, false, false, 0, true, UNSET, UNSET, 0, 0.0, 0.0, 0, 0, 0)
 ]
 
 !! ---------------------------------------------------------------- konstruktory (jak w iced)
@@ -391,6 +420,78 @@ fun hspace(w: Float) -> Element [
     let e = el_new("space")
     e.st.w = fixed(w)
     e.st.h = fixed(0.0)
+    end e
+]
+
+
+!! ---------------------------------------------------------------- grafika rastrowa
+!! Obraz z pliku (JPEG/PNG/WebP), z base64 lub `data:image/...;base64,...`. Domyslnie fit = cover.
+fun image(src: Str) -> Element [
+    let e = el_new("image")
+    e.text = src
+    e.fit = 1
+    end e
+]
+
+!! Obraz po identyfikatorze tekstury (`gui_image_open`, `gui_image_gradient`...)
+fun image_tex(tex: Int) -> Element [
+    let e = el_new("image")
+    e.img = tex
+    e.fit = 1
+    end e
+]
+
+!! Okno modalne: zawsze obecne w drzewie (zeby dalo sie animowac zanikanie); `open` wlacza scrim, pulapke fokusu
+!! i blokade klikniec pod spodem. `.on_dismiss("msg")` - klik poza trescia / Escape / B na padzie.
+fun modal(child: Element, open: Bool) -> Element [
+    let e = el_new("modal")
+    e.kids = [child]
+    e.on = open
+    e.trap = true
+    end e
+]
+
+!! Wysuwany panel (menu boczne): side 1 lewa, 2 prawa, 3 gora, 4 dol. Pulapka fokusu, gdy otwarty.
+fun drawer(child: Element, open: Bool, side: Int) -> Element [
+    let e = modal(child, open)
+    e.slide = side
+    if side == 1 [
+        e.st.ax = 0
+    ]
+    if side == 2 [
+        e.st.ax = 2
+    ]
+    if side == 3 [
+        e.st.ay = 0
+    ]
+    if side == 4 [
+        e.st.ay = 2
+    ]
+    end e
+]
+
+!! Wirtualna siatka: uklad liczony z `count`, `item_w` x `item_h` i `.spacing()`; tworzone/rysowane sa tylko
+!! widoczne wiersze (+1 bufora). `items` to kafelki o indeksach first..first+len (cala lista tez dziala).
+fun virtual_grid(count: Int, item_w: Float, item_h: Float, items: List<Element>) -> Element [
+    let e = el_new("vgrid")
+    e.nitems = count
+    e.item_w = item_w
+    e.item_h = item_h
+    e.kids = items
+    end e
+]
+
+!! Wirtualna lista (jedna kolumna na cala szerokosc) o stalej wysokosci wiersza
+fun virtual_scrollable(count: Int, item_h: Float, items: List<Element>) -> Element [
+    let e = virtual_grid(count, 0.0, item_h, items)
+    e.cols = 1
+    end e
+]
+
+!! Przewijanie poziome (karuzela)
+fun scrollable_x(child: Element) -> Element [
+    let e = scrollable(child)
+    e.axis = 1
     end e
 ]
 
@@ -640,6 +741,109 @@ impl Element [
     pub fun secret(self) -> Element [
         let e = self.clone()
         e.secret = true
+        end e
+    ]
+    !! ---- obrazy
+    pub fun fit(self, m: Int) -> Element [
+        let e = self.clone()
+        e.fit = m
+        end e
+    ]
+    pub fun fit_cover(self) -> Element [
+        let e = self.clone()
+        e.fit = 1
+        end e
+    ]
+    pub fun fit_contain(self) -> Element [
+        let e = self.clone()
+        e.fit = 2
+        end e
+    ]
+    pub fun fit_fill(self) -> Element [
+        let e = self.clone()
+        e.fit = 0
+        end e
+    ]
+    pub fun fit_none(self) -> Element [
+        let e = self.clone()
+        e.fit = 3
+        end e
+    ]
+    pub fun fit_scale_down(self) -> Element [
+        let e = self.clone()
+        e.fit = 4
+        end e
+    ]
+    !! punkt zakotwiczenia przy cover/contain (0..1)
+    pub fun focal(self, x: Float, y: Float) -> Element [
+        let e = self.clone()
+        e.fx = x
+        e.fy = y
+        end e
+    ]
+    !! proporcje szerokosc/wysokosc (np. 2.0/3.0 dla okladki)
+    pub fun aspect(self, r: Float) -> Element [
+        let e = self.clone()
+        e.aspect = r
+        end e
+    ]
+    !! ---- fokus i nawigacja przestrzenna
+    pub fun focusable(self) -> Element [
+        let e = self.clone()
+        e.focusable = true
+        end e
+    ]
+    pub fun focus_trap(self, on: Bool) -> Element [
+        let e = self.clone()
+        e.trap = on
+        end e
+    ]
+    pub fun focus_ring(self, on: Bool) -> Element [
+        let e = self.clone()
+        e.ring = on
+        end e
+    ]
+    !! ---- transformacje i animacje (skala wokol srodka, przesuniecie)
+    pub fun scale(self, f: Float) -> Element [
+        let e = self.clone()
+        e.st.scl = f
+        end e
+    ]
+    pub fun offset(self, x: Float, y: Float) -> Element [
+        let e = self.clone()
+        e.st.mvx = x
+        e.st.mvy = y
+        end e
+    ]
+    pub fun hover_scale(self, f: Float) -> Element [
+        let e = self.clone()
+        e.hv_scl = f
+        end e
+    ]
+    pub fun focus_scale(self, f: Float) -> Element [
+        let e = self.clone()
+        e.fo_scl = f
+        end e
+    ]
+    !! ---- przewijanie / wirtualizacja
+    pub fun horizontal(self) -> Element [
+        let e = self.clone()
+        e.axis = 1
+        end e
+    ]
+    pub fun first_index(self, n: Int) -> Element [
+        let e = self.clone()
+        e.first = n
+        end e
+    ]
+    pub fun columns(self, n: Int) -> Element [
+        let e = self.clone()
+        e.cols = n
+        end e
+    ]
+    pub fun on_dismiss(self, m: Str) -> Element [
+        let e = self.clone()
+        e.msg = m
         end e
     ]
     !! ---- zdarzenia: nazwa komunikatu zwracanego przez App
