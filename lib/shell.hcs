@@ -1,8 +1,8 @@
-get <bit:gui::native>
-get <bit:gui::util>
-get <bit:gui::color>
-get <bit:gui::theme>
-get <bit:gui::element>
+include <native>
+include <util>
+include <color>
+include <theme>
+include <element>
 
 !! ---------------------------------------------------------------- opcje okien layer-shell
 !! layer: background | bottom | top | overlay;  anchor: np. "top,left,right";  margin: "gora,prawo,dol,lewo"
