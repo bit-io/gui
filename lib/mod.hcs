@@ -12,3 +12,11 @@ include <app>
 include <shell>
 
 const GUI_VERSION: Str = "0.1"
+
+!! Punkt wejscia WYLACZNIE na potrzeby samodzielnej kompilacji biblioteki (`bit build` w katalogu gui/
+!! buduje lib/mod.hcs jak zwykly program, wiec bez `main` konczylo sie to error[E0601]).
+!! Gdy biblioteke wlacza program (`get <bit:gui>`), hackerc zamienia ten `main` na prywatny w module -
+!! nie koliduje z `main` programu i nie jest eksportowany.
+fun main() [
+    log("gui " + GUI_VERSION + " - biblioteka (nie program); uzyj: get <bit:gui>")
+]
